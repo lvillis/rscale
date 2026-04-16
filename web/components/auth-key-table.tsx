@@ -126,7 +126,7 @@ export function AuthKeyTable({
   bulkRevoking: boolean
   resetSelectionKey: number
 }) {
-  const { locale } = useConsole()
+  const { locale, timezone } = useConsole()
   const accessCopy = CONSOLE_COPY[locale].access
   const copy = CONSOLE_COPY[locale].access.table
   const common = CONSOLE_COPY[locale].common
@@ -337,7 +337,7 @@ export function AuthKeyTable({
         cell: ({ row }) => (
           <div className="space-y-1 text-sm text-muted-foreground">
             <div>{copy.usageCount(row.original.usage_count)}</div>
-            <div>{formatDateTime(row.original.last_used_at_unix_secs, locale)}</div>
+            <div>{formatDateTime(row.original.last_used_at_unix_secs, locale, timezone)}</div>
           </div>
         ),
       }),
@@ -357,8 +357,12 @@ export function AuthKeyTable({
         ),
         cell: ({ row }) => (
           <div className="space-y-1 text-sm text-muted-foreground">
-            <div>{copy.createdAt(formatDateTime(row.original.created_at_unix_secs, locale))}</div>
-            <div>{copy.expiresAt(formatDateTime(row.original.expires_at_unix_secs, locale))}</div>
+            <div>
+              {copy.createdAt(formatDateTime(row.original.created_at_unix_secs, locale, timezone))}
+            </div>
+            <div>
+              {copy.expiresAt(formatDateTime(row.original.expires_at_unix_secs, locale, timezone))}
+            </div>
           </div>
         ),
       }),
@@ -386,7 +390,7 @@ export function AuthKeyTable({
         ),
       }),
     ],
-    [accessCopy, common.notSet, copy, locale, onRevoke, pendingKeyId]
+    [accessCopy, common.notSet, copy, locale, onRevoke, pendingKeyId, timezone]
   )
 
   // eslint-disable-next-line react-hooks/incompatible-library

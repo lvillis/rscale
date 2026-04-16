@@ -29,6 +29,7 @@ import {
 import type { ConsoleLocale } from "./strings"
 
 type ConsoleTheme = "dark" | "light"
+export type ConsoleTimeZone = "local" | "utc"
 type ConsoleToastTone = "success" | "info" | "error"
 
 type ConsoleToast = {
@@ -48,8 +49,10 @@ type ConsoleContextValue = {
   hydrated: boolean
   theme: ConsoleTheme
   locale: ConsoleLocale
+  timezone: ConsoleTimeZone
   toggleTheme: () => void
   toggleLocale: () => void
+  toggleTimezone: () => void
   settings: ConsoleConnectionSettings
   draftSettings: ConsoleConnectionSettings
   setDraftSettings: Dispatch<SetStateAction<ConsoleConnectionSettings>>
@@ -74,6 +77,7 @@ type ConsoleContextValue = {
 
 const THEME_KEY = "rscale.console.theme"
 const LOCALE_KEY = "rscale.console.locale"
+const TIMEZONE_KEY = "rscale.console.timezone"
 
 const ConsoleContext = createContext<ConsoleContextValue | null>(null)
 
@@ -114,6 +118,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
   const [hydrated, setHydrated] = useState(false)
   const [theme, setTheme] = useState<ConsoleTheme>("dark")
   const [locale, setLocale] = useState<ConsoleLocale>("zh")
+  const [timezone, setTimezone] = useState<ConsoleTimeZone>("local")
   const [isRefreshing, startRefreshing] = useTransition()
   const [connectionVersion, setConnectionVersion] = useState(0)
   const [settings, setSettings] = useState<ConsoleConnectionSettings>(
@@ -139,6 +144,10 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       typeof window !== "undefined"
         ? (window.localStorage.getItem(LOCALE_KEY) as ConsoleLocale | null)
         : null
+    const persistedTimezone =
+      typeof window !== "undefined"
+        ? (window.localStorage.getItem(TIMEZONE_KEY) as ConsoleTimeZone | null)
+        : null
 
     const timer = window.setTimeout(() => {
       setSettings(persistedSettings)
@@ -146,6 +155,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       setUseCustomApiBaseUrl(Boolean(persistedSettings.apiBaseUrl.trim()))
       setTheme(persistedTheme === "light" ? "light" : "dark")
       setLocale(persistedLocale === "en" ? "en" : "zh")
+      setTimezone(persistedTimezone === "utc" ? "utc" : "local")
       setLastSyncAt(null)
       setConnectionVersion(Date.now())
       setHydrated(true)
@@ -174,6 +184,14 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
   }, [hydrated, locale])
 
   useEffect(() => {
+    if (!hydrated || typeof window === "undefined") {
+      return
+    }
+
+    window.localStorage.setItem(TIMEZONE_KEY, timezone)
+  }, [hydrated, timezone])
+
+  useEffect(() => {
     const toastTimers = toastTimersRef.current
 
     return () => {
@@ -192,6 +210,21 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
 
     const onStorage = (event: StorageEvent) => {
       if (event.storageArea !== window.localStorage) {
+        return
+      }
+
+      if (event.key === THEME_KEY) {
+        setTheme(event.newValue === "light" ? "light" : "dark")
+        return
+      }
+
+      if (event.key === LOCALE_KEY) {
+        setLocale(event.newValue === "en" ? "en" : "zh")
+        return
+      }
+
+      if (event.key === TIMEZONE_KEY) {
+        setTimezone(event.newValue === "utc" ? "utc" : "local")
         return
       }
 
@@ -331,8 +364,11 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     hydrated,
     theme,
     locale,
+    timezone,
     toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
     toggleLocale: () => setLocale((current) => (current === "zh" ? "en" : "zh")),
+    toggleTimezone: () =>
+      setTimezone((current) => (current === "local" ? "utc" : "local")),
     settings,
     draftSettings,
     setDraftSettings,

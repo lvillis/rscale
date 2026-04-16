@@ -121,3 +121,4 @@ can_port80 = true
 [telemetry]
 filter = "info"
 format = "compact"
+timezone = "local"

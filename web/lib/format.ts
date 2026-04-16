@@ -1,10 +1,19 @@
-type FormatLocale = "zh" | "en"
+export type FormatLocale = "zh" | "en"
+export type FormatTimeZone = "local" | "utc"
 
 function resolveLocale(locale: FormatLocale) {
   return locale === "zh" ? "zh-CN" : "en-US"
 }
 
-export function formatDateTime(unixSeconds?: number | null, locale: FormatLocale = "zh") {
+function resolveTimeZone(timezone: FormatTimeZone) {
+  return timezone === "utc" ? "UTC" : undefined
+}
+
+export function formatDateTime(
+  unixSeconds?: number | null,
+  locale: FormatLocale = "zh",
+  timezone: FormatTimeZone = "local"
+) {
   if (!unixSeconds) {
     return "—"
   }
@@ -12,7 +21,30 @@ export function formatDateTime(unixSeconds?: number | null, locale: FormatLocale
   return new Intl.DateTimeFormat(resolveLocale(locale), {
     dateStyle: "medium",
     timeStyle: "short",
+    timeZone: resolveTimeZone(timezone),
   }).format(new Date(unixSeconds * 1000))
+}
+
+export function formatClockTime(
+  value?: number | Date | null,
+  locale: FormatLocale = "zh",
+  timezone: FormatTimeZone = "local"
+) {
+  if (value === null || value === undefined) {
+    return "—"
+  }
+
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    return "—"
+  }
+
+  return new Intl.DateTimeFormat(resolveLocale(locale), {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    timeZone: resolveTimeZone(timezone),
+  }).format(date)
 }
 
 export function formatUptime(totalSeconds: number, locale: FormatLocale = "zh") {

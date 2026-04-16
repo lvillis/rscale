@@ -396,7 +396,15 @@ export function OverviewPage() {
 }
 
 export function NodesPage() {
-  const { settings, connectionReady, queryScope, locale, confirmAction, pushToast } = useConsole()
+  const {
+    settings,
+    connectionReady,
+    queryScope,
+    locale,
+    timezone,
+    confirmAction,
+    pushToast,
+  } = useConsole()
   const copy = CONSOLE_COPY[locale]
   const queryClient = useQueryClient()
   const [feedback, setFeedback] = useState<FeedbackState | null>(null)
@@ -593,7 +601,11 @@ export function NodesPage() {
                     { label: copy.common.ipv6, value: selectedNodeDetail.ipv6 ?? copy.common.noIpv6 },
                     {
                       label: copy.common.lastSeen,
-                      value: formatDateTime(selectedNodeDetail.last_seen_unix_secs, locale),
+                      value: formatDateTime(
+                        selectedNodeDetail.last_seen_unix_secs,
+                        locale,
+                        timezone
+                      ),
                     },
                     {
                       label: copy.common.identifier,
@@ -643,7 +655,15 @@ export function NodesPage() {
 }
 
 export function AccessPage() {
-  const { settings, connectionReady, queryScope, locale, confirmAction, pushToast } = useConsole()
+  const {
+    settings,
+    connectionReady,
+    queryScope,
+    locale,
+    timezone,
+    confirmAction,
+    pushToast,
+  } = useConsole()
   const copy = CONSOLE_COPY[locale]
   const queryClient = useQueryClient()
   const [draft, setDraft] = useState({
@@ -1070,15 +1090,27 @@ export function AccessPage() {
                       },
                       {
                         label: copy.common.createdAt,
-                        value: formatDateTime(selectedAuthKeyDetail.created_at_unix_secs, locale),
+                        value: formatDateTime(
+                          selectedAuthKeyDetail.created_at_unix_secs,
+                          locale,
+                          timezone
+                        ),
                       },
                       {
                         label: copy.common.expiresAt,
-                        value: formatDateTime(selectedAuthKeyDetail.expires_at_unix_secs, locale),
+                        value: formatDateTime(
+                          selectedAuthKeyDetail.expires_at_unix_secs,
+                          locale,
+                          timezone
+                        ),
                       },
                       {
                         label: copy.common.lastUsed,
-                        value: formatDateTime(selectedAuthKeyDetail.last_used_at_unix_secs, locale),
+                        value: formatDateTime(
+                          selectedAuthKeyDetail.last_used_at_unix_secs,
+                          locale,
+                          timezone
+                        ),
                       },
                     ]}
                   />
@@ -1125,7 +1157,15 @@ export function AccessPage() {
 }
 
 export function NetworkPage() {
-  const { settings, connectionReady, queryScope, locale, confirmAction, pushToast } = useConsole()
+  const {
+    settings,
+    connectionReady,
+    queryScope,
+    locale,
+    timezone,
+    confirmAction,
+    pushToast,
+  } = useConsole()
   const copy = CONSOLE_COPY[locale]
   const queryClient = useQueryClient()
   const [feedback, setFeedback] = useState<FeedbackState | null>(null)
@@ -1509,11 +1549,19 @@ export function NetworkPage() {
                 items={[
                   {
                     label: copy.network.refresh.lastSuccess,
-                    value: formatDateTime(derp?.last_refresh_success_unix_secs, locale),
+                    value: formatDateTime(
+                      derp?.last_refresh_success_unix_secs,
+                      locale,
+                      timezone
+                    ),
                   },
                   {
                     label: copy.network.refresh.lastAttempt,
-                    value: formatDateTime(derp?.last_refresh_attempt_unix_secs, locale),
+                    value: formatDateTime(
+                      derp?.last_refresh_attempt_unix_secs,
+                      locale,
+                      timezone
+                    ),
                   },
                   {
                     label: copy.network.refresh.interval,
@@ -1539,7 +1587,8 @@ export function NetworkPage() {
 }
 
 export function AuditPage() {
-  const { settings, connectionReady, queryScope, locale, pushToast } = useConsole()
+  const { settings, connectionReady, queryScope, locale, timezone, pushToast } =
+    useConsole()
   const copy = CONSOLE_COPY[locale]
   const [query, setQuery] = useUrlQueryState("audit-q")
   const [kind, setKind] = useUrlQueryState("audit-kind")
@@ -1739,7 +1788,7 @@ export function AuditPage() {
                   </div>
                 </div>
                 <div className="text-[12px] font-mono text-muted-foreground">
-                  {formatDateTime(event.occurred_at_unix_secs, locale)}
+                  {formatDateTime(event.occurred_at_unix_secs, locale, timezone)}
                 </div>
               </div>
             </div>
@@ -1840,7 +1889,11 @@ export function AuditPage() {
                       { label: copy.common.mechanism, value: selectedEvent.actor.mechanism },
                       {
                         label: copy.common.occurredAt,
-                        value: formatDateTime(selectedEvent.occurred_at_unix_secs, locale),
+                        value: formatDateTime(
+                          selectedEvent.occurred_at_unix_secs,
+                          locale,
+                          timezone
+                        ),
                       },
                     ]}
                   />

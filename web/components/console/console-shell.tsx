@@ -3,10 +3,11 @@
 import Image from "next/image"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { Command, Globe2, LogOut, Moon, RefreshCcw, Sun } from "lucide-react"
+import { Clock3, Command, Globe2, LogOut, Moon, RefreshCcw, Sun } from "lucide-react"
 import { useEffect, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import { formatClockTime } from "@/lib/format"
 import {
   CommandPalette,
   ConfirmDialog,
@@ -43,8 +44,10 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     hydrated,
     theme,
     locale,
+    timezone,
     toggleTheme,
     toggleLocale,
+    toggleTimezone,
     connectionReady,
     connectionLabel,
     runtimeOrigin,
@@ -133,12 +136,12 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     connectionLabel === "current-origin" ? runtimeOrigin || copy.currentOrigin : connectionLabel
   const resolvedLastSync =
     lastSyncAt && Number.isFinite(lastSyncAt)
-      ? new Intl.DateTimeFormat(locale === "zh" ? "zh-CN" : "en-US", {
-          hour: "2-digit",
-          minute: "2-digit",
-          second: "2-digit",
-        }).format(lastSyncAt)
+      ? formatClockTime(lastSyncAt, locale, timezone)
       : copy.common.never
+  const timezoneLabel =
+    timezone === "local" ? copy.timezoneLocal : copy.timezoneUtc
+  const timezoneHint =
+    timezone === "local" ? copy.common.localTime : copy.common.utcTime
   const isRouteTransitioning = navigatingTo !== null && navigatingTo !== pathname
 
   const onSignOut = () => {
@@ -195,6 +198,15 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
       keywords: ["language", "locale", copy.localeToggle],
       icon: Globe2,
       onSelect: () => toggleLocale(),
+    },
+    {
+      id: "action:timezone",
+      label: copy.commands.actions.timezone,
+      group: copy.commands.groups.actions,
+      hint: timezoneHint,
+      keywords: [copy.timezone, copy.common.localTime, copy.common.utcTime, "timezone", "utc"],
+      icon: Clock3,
+      onSelect: () => toggleTimezone(),
     },
     {
       id: "action:signout",
@@ -322,6 +334,10 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
                 <Button variant="outline" size="sm" onClick={toggleLocale}>
                   <Globe2 className="size-4" />
                   {copy.localeToggle}
+                </Button>
+                <Button variant="outline" size="sm" onClick={toggleTimezone}>
+                  <Clock3 className="size-4" />
+                  {timezoneLabel}
                 </Button>
                 <Button
                   variant="outline"

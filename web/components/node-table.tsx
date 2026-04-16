@@ -126,7 +126,7 @@ export function NodeTable({
   bulkDisabled: boolean
   resetSelectionKey: number
 }) {
-  const { locale } = useConsole()
+  const { locale, timezone } = useConsole()
   const copy = CONSOLE_COPY[locale].nodes
   const common = CONSOLE_COPY[locale].common
   const [sorting, setSorting] = useUrlSortingState("nodes-sort", DEFAULT_SORTING)
@@ -341,7 +341,7 @@ export function NodeTable({
         ),
         cell: ({ row }) => (
           <div className="text-sm text-muted-foreground">
-            {formatDateTime(row.original.last_seen_unix_secs, locale)}
+            {formatDateTime(row.original.last_seen_unix_secs, locale, timezone)}
           </div>
         ),
       }),
@@ -369,7 +369,7 @@ export function NodeTable({
         ),
       }),
     ],
-    [common, copy, locale, onDisable, pendingNodeId]
+    [common, copy, locale, onDisable, pendingNodeId, timezone]
   )
 
   // eslint-disable-next-line react-hooks/incompatible-library
