@@ -193,7 +193,7 @@ jobs:
           [telemetry]
           filter = "info"
           format = "json"
-EOF
+          EOF
           }
 
           docker_image_present() {
@@ -601,7 +601,7 @@ EOF
           [telemetry]
           filter = "info"
           format = "json"
-EOF
+          EOF
           }
 
           docker_image_present() {
