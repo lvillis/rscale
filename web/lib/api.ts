@@ -17,6 +17,8 @@ export type ConsoleConnectionSettings = {
   adminToken: string
 }
 
+const REQUEST_TIMEOUT_MS = 15_000
+
 export class ConsoleApiError extends Error {
   status: number
   code?: string
@@ -63,25 +65,40 @@ async function requestJson<T>(
 ) {
   const baseUrl = resolveApiBaseUrl(settings.apiBaseUrl)
   if (!baseUrl) {
-    throw new ConsoleApiError("缺少管理 API 地址", 400, "missing_api_base_url")
+    throw new ConsoleApiError("Missing admin API base URL", 400, "missing_api_base_url")
   }
 
   if (!settings.adminToken.trim()) {
-    throw new ConsoleApiError(
-      "缺少管理员 token",
-      400,
-      "missing_admin_token"
-    )
+    throw new ConsoleApiError("Missing administrator token", 400, "missing_admin_token")
   }
 
-  const response = await fetch(`${baseUrl}/api/v1/admin${path}`, {
-    ...init,
-    headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${settings.adminToken.trim()}`,
-      ...(init?.headers ?? {}),
-    },
-  })
+  const abortController = new AbortController()
+  const timeout = window.setTimeout(() => {
+    abortController.abort("request-timeout")
+  }, REQUEST_TIMEOUT_MS)
+
+  let response: Response
+  try {
+    response = await fetch(`${baseUrl}/api/v1/admin${path}`, {
+      ...init,
+      cache: "no-store",
+      signal: abortController.signal,
+      headers: {
+        Accept: "application/json",
+        Authorization: `Bearer ${settings.adminToken.trim()}`,
+        ...(init?.headers ?? {}),
+      },
+    })
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new ConsoleApiError("Request timed out", 408, "request_timeout")
+    }
+
+    throw new ConsoleApiError("Network request failed", 0, "network_error")
+  } finally {
+    window.clearTimeout(timeout)
+  }
+
   const payload = await parseResponseBody(response)
 
   if (!response.ok) {
@@ -91,14 +108,14 @@ async function requestJson<T>(
       "message" in payload &&
       typeof payload.message === "string"
         ? payload.message
-        : `请求失败 (${response.status})`
+        : `Request failed (${response.status})`
     const code =
       typeof payload === "object" &&
       payload !== null &&
       "code" in payload &&
       typeof payload.code === "string"
         ? payload.code
-        : undefined
+        : "request_failed"
 
     if (response.status === 401 && typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent(CONSOLE_AUTH_EXPIRED_EVENT))

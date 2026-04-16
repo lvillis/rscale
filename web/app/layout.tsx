@@ -1,15 +1,8 @@
 import type { Metadata } from "next"
-import { Inter } from "next/font/google"
 
 import { ConsoleProvider } from "@/components/console/console-context"
 import "./globals.css"
 import { Providers } from "./providers"
-
-const inter = Inter({
-  variable: "--font-inter",
-  subsets: ["latin"],
-  display: "swap",
-})
 
 export const metadata: Metadata = {
   title: "rscale Console",
@@ -31,11 +24,7 @@ export default function RootLayout({
   children: React.ReactNode
 }>) {
   return (
-    <html
-      lang="zh-CN"
-      suppressHydrationWarning
-      className={inter.variable}
-    >
+    <html lang="zh-CN" suppressHydrationWarning>
       <body className="min-h-screen bg-background font-sans text-foreground antialiased">
         <Providers>
           <ConsoleProvider>{children}</ConsoleProvider>

@@ -95,7 +95,7 @@
   --color-ring: var(--ring);
   --color-destructive: var(--destructive);
   --color-destructive-foreground: var(--destructive-foreground);
-  --font-sans: var(--font-inter);
+  --font-sans: "Inter", "SF Pro Display", "Segoe UI", ui-sans-serif, system-ui, sans-serif;
   --font-mono: "Berkeley Mono", ui-monospace, "SF Mono", Menlo, monospace;
   --radius-sm: var(--radius-sm);
   --radius-md: var(--radius-md);

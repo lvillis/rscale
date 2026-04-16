@@ -26,7 +26,7 @@ import {
   loadConnectionSettings,
   saveConnectionSettings,
 } from "@/lib/connection"
-import type { ConsoleLocale } from "./strings"
+import { CONSOLE_COPY, type ConsoleLocale } from "./strings"
 
 type ConsoleTheme = "dark" | "light"
 export type ConsoleTimeZone = "local" | "utc"
@@ -101,8 +101,39 @@ function resolveNextPath(nextPath: string) {
   return nextPath
 }
 
+function resolveErrorLocale(): ConsoleLocale {
+  if (typeof document === "undefined") {
+    return "zh"
+  }
+
+  return document.documentElement.lang.startsWith("en") ? "en" : "zh"
+}
+
+function translateConsoleError(error: ConsoleApiError, locale: ConsoleLocale) {
+  const copy = CONSOLE_COPY[locale]
+
+  switch (error.code) {
+    case "missing_api_base_url":
+      return copy.errors.missingApiBaseUrl
+    case "missing_admin_token":
+      return copy.errors.missingAdminToken
+    case "network_error":
+      return copy.errors.networkError
+    case "request_timeout":
+      return copy.errors.requestTimeout
+    case "request_failed":
+      return copy.errors.requestFailed(error.status)
+    default:
+      return null
+  }
+}
+
 export function getConsoleErrorMessage(error: unknown, fallback = "Unknown error") {
   if (error instanceof ConsoleApiError) {
+    const translated = translateConsoleError(error, resolveErrorLocale())
+    if (translated) {
+      return translated
+    }
     return error.message
   }
 
