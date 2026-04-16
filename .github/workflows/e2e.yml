@@ -43,7 +43,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
-      RSCALE_E2E_ARTIFACT_ROOT: ${{ runner.temp }}/rscale-e2e-artifacts
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -69,7 +68,7 @@ jobs:
           ROOT_DIR="${GITHUB_WORKSPACE}"
           CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
           SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
-          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT}"
+          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
 
           require_cmd() {
             local cmd=$1
@@ -437,7 +436,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
-      RSCALE_E2E_ARTIFACT_ROOT: ${{ runner.temp }}/rscale-e2e-artifacts
       TAILSCALE_HEAD_IMAGE: tailscale-head:ci
     steps:
       - name: Checkout
@@ -478,7 +476,7 @@ jobs:
           ROOT_DIR="${GITHUB_WORKSPACE}"
           CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
           SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
-          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT}"
+          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
 
           require_cmd() {
             local cmd=$1
