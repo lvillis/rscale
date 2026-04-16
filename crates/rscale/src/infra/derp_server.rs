@@ -732,7 +732,11 @@ impl EmbeddedDerpServer {
         }
 
         if !relay_client.can_mesh {
-            self.broadcast_peer_present(&relay_client).await;
+            self.send_existing_regular_peers(&relay_client).await;
+            self.broadcast_peer_present_to_regular_clients(&relay_client)
+                .await;
+            self.broadcast_peer_present_to_mesh_watchers(&relay_client)
+                .await;
         }
 
         info!(
@@ -1173,7 +1177,37 @@ impl EmbeddedDerpServer {
         info!(node_public = %client.public_key, "DERP client disconnected");
     }
 
-    async fn broadcast_peer_present(&self, peer: &RelayClient) {
+    async fn send_existing_regular_peers(&self, client: &RelayClient) {
+        let peers = self.inner.relay.regular_clients_except(client.client_id);
+        for peer in peers {
+            let _ = client
+                .sender
+                .send(OutboundFrame::PeerPresent {
+                    peer_public_key_raw: peer.public_key_raw,
+                    ip_bytes: socket_addr_ip_bytes(peer.remote_addr),
+                    port: peer.remote_addr.port(),
+                    flags: peer_present_flags(&peer),
+                })
+                .await;
+        }
+    }
+
+    async fn broadcast_peer_present_to_regular_clients(&self, peer: &RelayClient) {
+        let peers = self.inner.relay.regular_clients_except(peer.client_id);
+        for client in peers {
+            let _ = client
+                .sender
+                .send(OutboundFrame::PeerPresent {
+                    peer_public_key_raw: peer.public_key_raw,
+                    ip_bytes: socket_addr_ip_bytes(peer.remote_addr),
+                    port: peer.remote_addr.port(),
+                    flags: peer_present_flags(peer),
+                })
+                .await;
+        }
+    }
+
+    async fn broadcast_peer_present_to_mesh_watchers(&self, peer: &RelayClient) {
         let watchers = self.inner.relay.watchers();
         for watcher in watchers {
             let _ = watcher
@@ -1331,6 +1365,14 @@ impl RelayState {
         self.clients_read()
             .values()
             .filter(|peer| !peer.can_mesh)
+            .cloned()
+            .collect()
+    }
+
+    fn regular_clients_except(&self, client_id: u64) -> Vec<RelayClient> {
+        self.clients_read()
+            .values()
+            .filter(|peer| !peer.can_mesh && peer.client_id != client_id)
             .cloned()
             .collect()
     }
@@ -1971,6 +2013,115 @@ mod tests {
             mesh_url_for_node(&node, None)?,
             "wss://derp-b.example.com/derp"
         );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn regular_clients_receive_existing_peers_and_new_peer_broadcast() -> TestResult {
+        let server_private_key = parse_node_private_key(
+            "privkey:1111111111111111111111111111111111111111111111111111111111111111",
+        )?;
+        let server_public_key = node_public_key_from_private(&server_private_key);
+        let server_public_key_raw = parse_node_public_key(&server_public_key)?;
+        let server = EmbeddedDerpServer {
+            inner: Arc::new(EmbeddedDerpServerInner {
+                database: None,
+                verify_clients: false,
+                keepalive_interval: Duration::from_secs(60),
+                mesh_key: None,
+                mesh_key_hex: None,
+                mesh_retry_interval: Duration::from_secs(60),
+                server_private_key,
+                server_public_key,
+                server_public_key_raw,
+                relay: RelayState::default(),
+                mesh: MeshState::default(),
+                metrics: RelayMetrics::default(),
+            }),
+        };
+
+        let (sender_a, mut receiver_a) = mpsc::channel(4);
+        let (sender_b, mut receiver_b) = mpsc::channel(4);
+        let client_a = RelayClient {
+            client_id: 1,
+            public_key: node_public_key_from_private(&parse_node_private_key(
+                "privkey:2222222222222222222222222222222222222222222222222222222222222222",
+            )?),
+            public_key_raw: parse_node_public_key(&node_public_key_from_private(
+                &parse_node_private_key(
+                    "privkey:2222222222222222222222222222222222222222222222222222222222222222",
+                )?,
+            ))?,
+            sender: sender_a,
+            remote_addr: "203.0.113.10:41641".parse()?,
+            can_mesh: false,
+            is_prober: false,
+        };
+        let client_b = RelayClient {
+            client_id: 2,
+            public_key: node_public_key_from_private(&parse_node_private_key(
+                "privkey:3333333333333333333333333333333333333333333333333333333333333333",
+            )?),
+            public_key_raw: parse_node_public_key(&node_public_key_from_private(
+                &parse_node_private_key(
+                    "privkey:3333333333333333333333333333333333333333333333333333333333333333",
+                )?,
+            ))?,
+            sender: sender_b,
+            remote_addr: "203.0.113.11:41642".parse()?,
+            can_mesh: false,
+            is_prober: false,
+        };
+
+        server.inner.relay.register(client_a.clone());
+        server.inner.relay.register(client_b.clone());
+
+        server.send_existing_regular_peers(&client_b).await;
+        let frame_for_b = receiver_b
+            .recv()
+            .await
+            .ok_or_else(|| std::io::Error::other("missing peer-present for new client"))?;
+        match frame_for_b {
+            OutboundFrame::PeerPresent {
+                peer_public_key_raw,
+                port,
+                ..
+            } => {
+                assert_eq!(peer_public_key_raw, client_a.public_key_raw);
+                assert_eq!(port, client_a.remote_addr.port());
+            }
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "unexpected frame for new client: {other:?}"
+                ))
+                .into());
+            }
+        }
+
+        server
+            .broadcast_peer_present_to_regular_clients(&client_b)
+            .await;
+        let frame_for_a = receiver_a
+            .recv()
+            .await
+            .ok_or_else(|| std::io::Error::other("missing peer-present for existing client"))?;
+        match frame_for_a {
+            OutboundFrame::PeerPresent {
+                peer_public_key_raw,
+                port,
+                ..
+            } => {
+                assert_eq!(peer_public_key_raw, client_b.public_key_raw);
+                assert_eq!(port, client_b.remote_addr.port());
+            }
+            other => {
+                return Err(std::io::Error::other(format!(
+                    "unexpected frame for existing client: {other:?}"
+                ))
+                .into());
+            }
+        }
 
         Ok(())
     }
