@@ -56,7 +56,7 @@ use crate::infra::db::{
 use crate::infra::derp::{DerpMapRuntime, DerpRuntimeStatus};
 use crate::infra::derp_server::{DerpRelaySnapshot, EmbeddedDerpServer};
 use crate::protocol::{
-    ControlService, DerpAdmitClientRequest, DerpAdmitClientResponse, EarlyNoise,
+    ControlDerpMap, ControlService, DerpAdmitClientRequest, DerpAdmitClientResponse, EarlyNoise,
     MapRequest as ControlMapRequest, MapResponse, OverTlsPublicKeyResponse,
     RegisterRequest as ControlRegisterRequest, accept as accept_noise_connection, encode_json_body,
     encode_map_response_frame, generate_challenge_public_key, incremental_map_response,
@@ -92,7 +92,7 @@ struct AppState {
     control_public_key: String,
     admin_auth: BreakGlassAuth,
     metrics: ServerMetrics,
-    tls_acceptor: TlsAcceptor,
+    tls_acceptor: Option<TlsAcceptor>,
 }
 
 impl AppState {
@@ -127,6 +127,8 @@ impl AppState {
 
         let control_private_key = parse_machine_private_key(&config.server.control_private_key)?;
         let admin_auth = BreakGlassAuth::from_config(&config.auth)?;
+        let derp = DerpMapRuntime::from_static_config(&config.derp);
+        let tls_acceptor = build_embedded_tls_acceptor(&config, &derp.effective_map())?;
 
         Ok(Self {
             config: config.clone(),
@@ -135,7 +137,7 @@ impl AppState {
             config_doctor: serde_json::json!({}),
             config_has_warnings: false,
             database: None,
-            derp: DerpMapRuntime::from_static_config(&config.derp),
+            derp,
             embedded_derp: None,
             control_service: None,
             oidc: None,
@@ -143,7 +145,7 @@ impl AppState {
             control_public_key: machine_public_key_from_private(&control_private_key),
             admin_auth,
             metrics: ServerMetrics::new(),
-            tls_acceptor: build_embedded_tls_acceptor(&config)?,
+            tls_acceptor,
         })
     }
 
@@ -235,9 +237,11 @@ pub async fn serve(loaded: tier::LoadedConfig<AppConfig>) -> AppResult<()> {
     let database = PostgresStore::connect(&config.database, &config.network).await?;
     let bind_addr = config.bind_addr()?;
     let derp = DerpMapRuntime::bootstrap(&config.derp).await?;
+    let effective_derp_map = derp.effective_map();
     let embedded_derp =
-        EmbeddedDerpServer::bootstrap(&config.derp, &derp.effective_map(), Some(database.clone()))
+        EmbeddedDerpServer::bootstrap(&config.derp, &effective_derp_map, Some(database.clone()))
             .await?;
+    let tls_acceptor = build_embedded_tls_acceptor(&config, &effective_derp_map)?;
     let oidc =
         OidcRuntime::from_config(&config.auth.oidc, config.server.public_base_url.as_deref())
             .await?;
@@ -259,7 +263,7 @@ pub async fn serve(loaded: tier::LoadedConfig<AppConfig>) -> AppResult<()> {
         control_public_key,
         admin_auth,
         metrics: ServerMetrics::new(),
-        tls_acceptor: build_embedded_tls_acceptor(&config)?,
+        tls_acceptor,
     };
     let app = router(state.clone());
     let listener = TcpListener::bind(bind_addr).await?;
@@ -269,7 +273,14 @@ pub async fn serve(loaded: tier::LoadedConfig<AppConfig>) -> AppResult<()> {
     serve_http(listener, app, state).await
 }
 
-fn build_embedded_tls_acceptor(config: &AppConfig) -> AppResult<TlsAcceptor> {
+fn build_embedded_tls_acceptor(
+    config: &AppConfig,
+    effective_derp_map: &ControlDerpMap,
+) -> AppResult<Option<TlsAcceptor>> {
+    if !embedded_tls_required(config, effective_derp_map) {
+        return Ok(None);
+    }
+
     let mut subject_alt_names =
         BTreeSet::from(["localhost".to_string(), "host.docker.internal".to_string()]);
     for region in &config.derp.regions {
@@ -299,7 +310,42 @@ fn build_embedded_tls_acceptor(config: &AppConfig) -> AppResult<TlsAcceptor> {
             AppError::Bootstrap(format!("failed to build embedded TLS config: {err}"))
         })?;
 
-    Ok(TlsAcceptor::from(Arc::new(tls_config)))
+    warn!(
+        "embedded TLS is enabled with a generated self-signed certificate; prefer trusted TLS termination for production"
+    );
+
+    Ok(Some(TlsAcceptor::from(Arc::new(tls_config))))
+}
+
+fn embedded_tls_required(config: &AppConfig, effective_derp_map: &ControlDerpMap) -> bool {
+    if !config.derp.server.enabled {
+        return false;
+    }
+
+    let configured_node_name = config
+        .derp
+        .server
+        .node_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if let Some(node_name) = configured_node_name
+        && let Some(node) = effective_derp_map
+            .regions
+            .values()
+            .flat_map(|region| region.nodes.iter())
+            .find(|node| node.name == node_name)
+    {
+        return !node.insecure_for_tests && !node.stun_only;
+    }
+
+    config
+        .derp
+        .regions
+        .iter()
+        .flat_map(|region| region.nodes.iter())
+        .any(|node| !node.insecure_for_tests && !node.stun_only)
 }
 
 async fn stream_looks_like_tls(stream: &TcpStream) -> AppResult<bool> {
@@ -351,7 +397,12 @@ async fn serve_http_connection(
     state: AppState,
 ) -> AppResult<()> {
     if stream_looks_like_tls(&stream).await? {
-        let tls_stream = state.tls_acceptor.accept(stream).await.map_err(|err| {
+        let Some(acceptor) = state.tls_acceptor.clone() else {
+            return Err(AppError::InvalidRequest(
+                "received TLS connection but embedded TLS is not enabled".to_string(),
+            ));
+        };
+        let tls_stream = acceptor.accept(stream).await.map_err(|err| {
             AppError::Bootstrap(format!("failed to accept TLS connection: {err}"))
         })?;
         return serve_http_stream_connection(tls_stream, remote_addr, app, state).await;

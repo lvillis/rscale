@@ -135,42 +135,42 @@ impl AppConfig {
             }
         }))
         .prefix("RSCALE")
-            .with_alias("RSCALE_BIND_ADDR", "server.bind_addr")
-            .with_alias("RSCALE_WEB_ROOT", "server.web_root")
-            .with_alias("RSCALE_CONTROL_PRIVATE_KEY", "server.control_private_key")
-            .with_alias("RSCALE_TAILNET_IPV4_RANGE", "network.tailnet_ipv4_range")
-            .with_alias("RSCALE_TAILNET_IPV6_RANGE", "network.tailnet_ipv6_range")
-            .with_alias("RSCALE_DATABASE_URL", "database.url")
-            .with_alias("RSCALE_BREAK_GLASS_TOKEN", "auth.break_glass_token")
-            .with_alias("RSCALE_OIDC_ENABLED", "auth.oidc.enabled")
-            .with_alias("RSCALE_OIDC_ISSUER_URL", "auth.oidc.issuer_url")
-            .with_alias("RSCALE_OIDC_CLIENT_ID", "auth.oidc.client_id")
-            .with_alias("RSCALE_OIDC_CLIENT_SECRET", "auth.oidc.client_secret")
-            .with_alias(
-                "RSCALE_CONTROL_DIAL_CANDIDATE_IP",
-                "control.dial_plan.candidates[0].ip",
-            )
-            .with_alias(
-                "RSCALE_CONTROL_TAILNET_DISPLAY_NAME",
-                "control.node_attrs.tailnet_display_name",
-            )
-            .with_alias(
-                "RSCALE_CONTROL_CLIENT_LATEST_VERSION",
-                "control.client_version.latest_version",
-            )
-            .with_alias(
-                "RSCALE_CONTROL_COLLECT_SERVICES",
-                "control.collect_services",
-            )
-            .with_alias("RSCALE_CONTROL_POP_BROWSER_URL", "control.pop_browser_url")
-            .with_alias("RSCALE_DERP_SERVER_ENABLED", "derp.server.enabled")
-            .with_alias("RSCALE_DERP_SERVER_PRIVATE_KEY", "derp.server.private_key")
-            .with_alias("RSCALE_DERP_SERVER_MESH_KEY", "derp.server.mesh_key")
-            .with_alias("RSCALE_DERP_SERVER_NODE_NAME", "derp.server.node_name")
-            .with_alias("RSCALE_DERP_STUN_BIND_ADDR", "derp.server.stun_bind_addr")
-            .with_alias("RSCALE_LOG_FILTER", "telemetry.filter")
-            .with_alias("RSCALE_LOG_FORMAT", "telemetry.format")
-            .with_alias("RSCALE_LOG_TIMEZONE", "telemetry.timezone")
+        .with_alias("RSCALE_BIND_ADDR", "server.bind_addr")
+        .with_alias("RSCALE_WEB_ROOT", "server.web_root")
+        .with_alias("RSCALE_CONTROL_PRIVATE_KEY", "server.control_private_key")
+        .with_alias("RSCALE_TAILNET_IPV4_RANGE", "network.tailnet_ipv4_range")
+        .with_alias("RSCALE_TAILNET_IPV6_RANGE", "network.tailnet_ipv6_range")
+        .with_alias("RSCALE_DATABASE_URL", "database.url")
+        .with_alias("RSCALE_BREAK_GLASS_TOKEN", "auth.break_glass_token")
+        .with_alias("RSCALE_OIDC_ENABLED", "auth.oidc.enabled")
+        .with_alias("RSCALE_OIDC_ISSUER_URL", "auth.oidc.issuer_url")
+        .with_alias("RSCALE_OIDC_CLIENT_ID", "auth.oidc.client_id")
+        .with_alias("RSCALE_OIDC_CLIENT_SECRET", "auth.oidc.client_secret")
+        .with_alias(
+            "RSCALE_CONTROL_DIAL_CANDIDATE_IP",
+            "control.dial_plan.candidates[0].ip",
+        )
+        .with_alias(
+            "RSCALE_CONTROL_TAILNET_DISPLAY_NAME",
+            "control.node_attrs.tailnet_display_name",
+        )
+        .with_alias(
+            "RSCALE_CONTROL_CLIENT_LATEST_VERSION",
+            "control.client_version.latest_version",
+        )
+        .with_alias(
+            "RSCALE_CONTROL_COLLECT_SERVICES",
+            "control.collect_services",
+        )
+        .with_alias("RSCALE_CONTROL_POP_BROWSER_URL", "control.pop_browser_url")
+        .with_alias("RSCALE_DERP_SERVER_ENABLED", "derp.server.enabled")
+        .with_alias("RSCALE_DERP_SERVER_PRIVATE_KEY", "derp.server.private_key")
+        .with_alias("RSCALE_DERP_SERVER_MESH_KEY", "derp.server.mesh_key")
+        .with_alias("RSCALE_DERP_SERVER_NODE_NAME", "derp.server.node_name")
+        .with_alias("RSCALE_DERP_STUN_BIND_ADDR", "derp.server.stun_bind_addr")
+        .with_alias("RSCALE_LOG_FILTER", "telemetry.filter")
+        .with_alias("RSCALE_LOG_FORMAT", "telemetry.format")
+        .with_alias("RSCALE_LOG_TIMEZONE", "telemetry.timezone")
     }
 
     fn resolve_path(config_path: Option<&Path>) -> AppResult<Option<PathBuf>> {
@@ -1612,7 +1612,10 @@ timezone = "local"
             .load()?;
 
         assert_eq!(loaded.server.bind_addr, "0.0.0.0:9090");
-        assert_eq!(loaded.database.url.as_deref(), Some("postgres://localhost/rscale"));
+        assert_eq!(
+            loaded.database.url.as_deref(),
+            Some("postgres://localhost/rscale")
+        );
         Ok(())
     }
 
