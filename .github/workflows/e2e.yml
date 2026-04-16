@@ -42,7 +42,7 @@ jobs:
           --health-retries 12
     env:
       CARGO_TERM_COLOR: always
-      RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
+      E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -50,7 +50,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -60,15 +60,15 @@ jobs:
 
       - name: Run compatibility suite
         env:
-          RSCALE_E2E_SUITE_NAME: ${{ matrix.suite }}
-          RSCALE_E2E_CLIENT_IMAGE: ${{ matrix.client_image }}
+          E2E_SUITE_NAME: ${{ matrix.suite }}
+          E2E_CLIENT_IMAGE: ${{ matrix.client_image }}
         run: |
           set -euo pipefail
 
           ROOT_DIR="${GITHUB_WORKSPACE}"
-          CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
-          SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
-          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
+          CLIENT_IMAGE="${E2E_CLIENT_IMAGE}"
+          SUITE_NAME="${E2E_SUITE_NAME}"
+          ARTIFACT_ROOT="${E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
 
           require_cmd() {
             local cmd=$1
@@ -98,14 +98,14 @@ jobs:
           mkdir -p "${STATUS_DIR}"
           echo "e2e artifacts: ${ARTIFACT_DIR}"
 
-          CONTROL_PORT="${RSCALE_E2E_CONTROL_PORT:-18080}"
-          STUN_PORT="${RSCALE_E2E_STUN_PORT:-3478}"
-          LOGIN_HOST="${RSCALE_E2E_LOGIN_HOST:-host.docker.internal}"
-          LOGIN_SERVER="${RSCALE_E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
-          PUBLIC_BASE_URL="${RSCALE_E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
-          DATABASE_URL="${RSCALE_E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
-          ADMIN_TOKEN="${RSCALE_E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
-          BREAK_GLASS_USERNAME="${RSCALE_E2E_BREAK_GLASS_USERNAME:-ci-admin}"
+          CONTROL_PORT="${E2E_CONTROL_PORT:-18080}"
+          STUN_PORT="${E2E_STUN_PORT:-3478}"
+          LOGIN_HOST="${E2E_LOGIN_HOST:-host.docker.internal}"
+          LOGIN_SERVER="${E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
+          PUBLIC_BASE_URL="${E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
+          DATABASE_URL="${E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
+          ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
+          BREAK_GLASS_USERNAME="${E2E_BREAK_GLASS_USERNAME:-ci-admin}"
           NETWORK_NAME="rscale-e2e-${SUITE_SLUG}"
           CLIENT_A_HOSTNAME="client-a-${SUITE_SLUG}"
           CLIENT_B_HOSTNAME="client-b-${SUITE_SLUG}"
@@ -435,7 +435,7 @@ jobs:
           --health-retries 12
     env:
       CARGO_TERM_COLOR: always
-      RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
+      E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
       TAILSCALE_HEAD_IMAGE: tailscale-head:ci
     steps:
       - name: Checkout
@@ -444,7 +444,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.94.0
+          toolchain: 1.95.0
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -468,15 +468,15 @@ jobs:
 
       - name: Run compatibility suite
         env:
-          RSCALE_E2E_SUITE_NAME: head
-          RSCALE_E2E_CLIENT_IMAGE: ${{ env.TAILSCALE_HEAD_IMAGE }}
+          E2E_SUITE_NAME: head
+          E2E_CLIENT_IMAGE: ${{ env.TAILSCALE_HEAD_IMAGE }}
         run: |
           set -euo pipefail
 
           ROOT_DIR="${GITHUB_WORKSPACE}"
-          CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
-          SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
-          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
+          CLIENT_IMAGE="${E2E_CLIENT_IMAGE}"
+          SUITE_NAME="${E2E_SUITE_NAME}"
+          ARTIFACT_ROOT="${E2E_ARTIFACT_ROOT:-${RUNNER_TEMP}/rscale-e2e-artifacts}"
 
           require_cmd() {
             local cmd=$1
@@ -506,14 +506,14 @@ jobs:
           mkdir -p "${STATUS_DIR}"
           echo "e2e artifacts: ${ARTIFACT_DIR}"
 
-          CONTROL_PORT="${RSCALE_E2E_CONTROL_PORT:-18080}"
-          STUN_PORT="${RSCALE_E2E_STUN_PORT:-3478}"
-          LOGIN_HOST="${RSCALE_E2E_LOGIN_HOST:-host.docker.internal}"
-          LOGIN_SERVER="${RSCALE_E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
-          PUBLIC_BASE_URL="${RSCALE_E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
-          DATABASE_URL="${RSCALE_E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
-          ADMIN_TOKEN="${RSCALE_E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
-          BREAK_GLASS_USERNAME="${RSCALE_E2E_BREAK_GLASS_USERNAME:-ci-admin}"
+          CONTROL_PORT="${E2E_CONTROL_PORT:-18080}"
+          STUN_PORT="${E2E_STUN_PORT:-3478}"
+          LOGIN_HOST="${E2E_LOGIN_HOST:-host.docker.internal}"
+          LOGIN_SERVER="${E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
+          PUBLIC_BASE_URL="${E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
+          DATABASE_URL="${E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
+          ADMIN_TOKEN="${E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
+          BREAK_GLASS_USERNAME="${E2E_BREAK_GLASS_USERNAME:-ci-admin}"
           NETWORK_NAME="rscale-e2e-${SUITE_SLUG}"
           CLIENT_A_HOSTNAME="client-a-${SUITE_SLUG}"
           CLIENT_B_HOSTNAME="client-b-${SUITE_SLUG}"
