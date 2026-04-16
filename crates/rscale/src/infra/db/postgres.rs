@@ -1508,7 +1508,7 @@ impl PostgresStore {
         let evaluated_policy = policy.evaluate_for_node(
             &self_node,
             &std::iter::once(self_node.clone())
-                .chain(peers.clone().into_iter())
+                .chain(peers.clone())
                 .collect::<Vec<_>>(),
             &routes,
         )?;
