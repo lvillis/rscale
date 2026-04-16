@@ -212,7 +212,24 @@ jobs:
               "tailscale --socket='${CLIENT_SOCKET}' status --json"
           }
 
+          report_control_plane_failure() {
+            if [[ "${CONTROL_PLANE_FAILURE_REPORTED:-0}" -eq 1 ]]; then
+              return
+            fi
+
+            CONTROL_PLANE_FAILURE_REPORTED=1
+            echo "rscale control plane failed before readiness" >&2
+            if [[ -f "${RSCALED_LOG}" ]]; then
+              tail -n 200 "${RSCALED_LOG}" >&2 || true
+            fi
+          }
+
           wait_for_http_ready() {
+            if ! kill -0 "${RSCALED_PID}" >/dev/null 2>&1; then
+              report_control_plane_failure
+              return 1
+            fi
+
             curl --fail --silent --show-error "${PUBLIC_BASE_URL}/readyz" >/dev/null
           }
 
@@ -281,7 +298,10 @@ jobs:
             RSCALE_CONFIG="${CONFIG_PATH}" "${RSCALE_BIN}" server >"${RSCALED_LOG}" 2>&1 &
             RSCALED_PID=$!
 
-            retry 60 2 wait_for_http_ready
+            retry 60 2 wait_for_http_ready || {
+              report_control_plane_failure
+              return 1
+            }
 
             "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" health >"${ADMIN_HEALTH_PATH}"
           }
@@ -620,7 +640,24 @@ jobs:
               "tailscale --socket='${CLIENT_SOCKET}' status --json"
           }
 
+          report_control_plane_failure() {
+            if [[ "${CONTROL_PLANE_FAILURE_REPORTED:-0}" -eq 1 ]]; then
+              return
+            fi
+
+            CONTROL_PLANE_FAILURE_REPORTED=1
+            echo "rscale control plane failed before readiness" >&2
+            if [[ -f "${RSCALED_LOG}" ]]; then
+              tail -n 200 "${RSCALED_LOG}" >&2 || true
+            fi
+          }
+
           wait_for_http_ready() {
+            if ! kill -0 "${RSCALED_PID}" >/dev/null 2>&1; then
+              report_control_plane_failure
+              return 1
+            fi
+
             curl --fail --silent --show-error "${PUBLIC_BASE_URL}/readyz" >/dev/null
           }
 
@@ -689,7 +726,10 @@ jobs:
             RSCALE_CONFIG="${CONFIG_PATH}" "${RSCALE_BIN}" server >"${RSCALED_LOG}" 2>&1 &
             RSCALED_PID=$!
 
-            retry 60 2 wait_for_http_ready
+            retry 60 2 wait_for_http_ready || {
+              report_control_plane_failure
+              return 1
+            }
 
             "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" health >"${ADMIN_HEALTH_PATH}"
           }
