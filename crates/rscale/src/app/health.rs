@@ -49,6 +49,7 @@ impl HealthService {
             oidc_enabled: self.config.auth.oidc.enabled,
             config_has_warnings,
             log_format: self.config.telemetry.format.as_str().to_string(),
+            log_timezone: self.config.telemetry.timezone.as_str().to_string(),
         }
     }
 }
@@ -81,4 +82,5 @@ pub struct AdminHealthResponse {
     pub oidc_enabled: bool,
     pub config_has_warnings: bool,
     pub log_format: String,
+    pub log_timezone: String,
 }

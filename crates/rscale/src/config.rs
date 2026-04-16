@@ -81,6 +81,7 @@ impl AppConfig {
             control_pop_browser_url_configured: self.control.pop_browser_url.is_some(),
             log_filter: self.telemetry.filter.clone(),
             log_format: self.telemetry.format.as_str().to_string(),
+            log_timezone: self.telemetry.timezone.as_str().to_string(),
         }
     }
 
@@ -152,6 +153,7 @@ impl AppConfig {
             .with_alias("RSCALE_DERP_STUN_BIND_ADDR", "derp.server.stun_bind_addr")
             .with_alias("RSCALE_LOG_FILTER", "telemetry.filter")
             .with_alias("RSCALE_LOG_FORMAT", "telemetry.format")
+            .with_alias("RSCALE_LOG_TIMEZONE", "telemetry.timezone")
     }
 
     fn resolve_path(config_path: Option<&Path>) -> AppResult<Option<PathBuf>> {
@@ -1154,6 +1156,7 @@ impl Default for OidcConfig {
 pub struct TelemetryConfig {
     pub filter: String,
     pub format: LogFormat,
+    pub timezone: LogTimezone,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TierConfig)]
@@ -1255,6 +1258,7 @@ impl Default for TelemetryConfig {
         Self {
             filter: "info".to_string(),
             format: LogFormat::Pretty,
+            timezone: LogTimezone::Utc,
         }
     }
 }
@@ -1293,6 +1297,37 @@ impl FromStr for LogFormat {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, TierConfig)]
+#[serde(rename_all = "snake_case")]
+pub enum LogTimezone {
+    #[default]
+    Utc,
+    Local,
+}
+
+impl LogTimezone {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Utc => "utc",
+            Self::Local => "local",
+        }
+    }
+}
+
+impl FromStr for LogTimezone {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "utc" => Ok(Self::Utc),
+            "local" => Ok(Self::Local),
+            _ => Err(AppError::InvalidConfig(format!(
+                "unsupported log timezone: {value}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ConfigSummary {
     pub bind_addr: String,
@@ -1320,6 +1355,7 @@ pub struct ConfigSummary {
     pub control_pop_browser_url_configured: bool,
     pub log_filter: String,
     pub log_format: String,
+    pub log_timezone: String,
 }
 
 fn validate_machine_private_key(value: &str) -> Result<(), String> {
@@ -1524,6 +1560,7 @@ derp_port = 443
 [telemetry]
 filter = "debug"
 format = "json"
+timezone = "local"
 "#,
         )?;
 
@@ -1533,6 +1570,7 @@ format = "json"
         assert_eq!(loaded.network.tailnet_ipv4_range, "100.64.0.0/10");
         assert_eq!(loaded.database.max_connections, 32);
         assert_eq!(loaded.telemetry.format, LogFormat::Json);
+        assert_eq!(loaded.telemetry.timezone, LogTimezone::Local);
         assert!(loaded.config().validate().is_ok());
         assert!(!loaded.report().has_warnings());
 

@@ -68,7 +68,7 @@ zstd = { version = "0.13.3", default-features = false }
 
 # Telemetry
 tracing = { version = "0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "local-time", "std", "time"] }
 
 [dev-dependencies]
 criterion = "0.8.2"

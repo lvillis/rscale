@@ -2,7 +2,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::config::{LogFormat, TelemetryConfig};
+use crate::config::{LogFormat, LogTimezone, TelemetryConfig};
 use crate::error::{AppError, AppResult};
 
 pub fn init(config: &TelemetryConfig) -> AppResult<()> {
@@ -10,23 +10,69 @@ pub fn init(config: &TelemetryConfig) -> AppResult<()> {
         .or_else(|_| EnvFilter::try_new(config.filter.clone()))
         .map_err(|err| AppError::Bootstrap(format!("invalid log filter: {err}")))?;
 
-    match config.format {
-        LogFormat::Json => tracing_subscriber::registry()
+    match (config.format.clone(), config.timezone.clone()) {
+        (LogFormat::Json, LogTimezone::Utc) => tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().json())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339()),
+            )
             .try_init(),
-        LogFormat::Pretty => tracing_subscriber::registry()
+        (LogFormat::Pretty, LogTimezone::Utc) => tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().pretty())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339()),
+            )
             .try_init(),
-        LogFormat::Compact => tracing_subscriber::registry()
+        (LogFormat::Compact, LogTimezone::Utc) => tracing_subscriber::registry()
             .with(filter)
-            .with(tracing_subscriber::fmt::layer().compact())
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .compact()
+                    .with_timer(tracing_subscriber::fmt::time::UtcTime::rfc_3339()),
+            )
+            .try_init(),
+        (LogFormat::Json, LogTimezone::Local) => tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_timer(local_rfc3339_timer()?),
+            )
+            .try_init(),
+        (LogFormat::Pretty, LogTimezone::Local) => tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .pretty()
+                    .with_timer(local_rfc3339_timer()?),
+            )
+            .try_init(),
+        (LogFormat::Compact, LogTimezone::Local) => tracing_subscriber::registry()
+            .with(filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .compact()
+                    .with_timer(local_rfc3339_timer()?),
+            )
             .try_init(),
     }
     .map_err(|err| AppError::Bootstrap(format!("failed to initialize telemetry: {err}")))?;
 
     Ok(())
+}
+
+fn local_rfc3339_timer() -> AppResult<
+    tracing_subscriber::fmt::time::OffsetTime<time::format_description::well_known::Rfc3339>,
+> {
+    tracing_subscriber::fmt::time::OffsetTime::local_rfc_3339().map_err(|err| {
+        AppError::Bootstrap(format!(
+            "failed to determine local timezone offset for log timestamps: {err}"
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -54,6 +100,7 @@ mod tests {
         let err = match init(&TelemetryConfig {
             filter: "[".to_string(),
             format: LogFormat::Json,
+            timezone: LogTimezone::Utc,
         }) {
             Ok(_) => return Err(std::io::Error::other("invalid filter should be rejected").into()),
             Err(err) => err,
