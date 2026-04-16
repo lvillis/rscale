@@ -117,7 +117,24 @@ impl AppConfig {
     }
 
     fn env_source() -> EnvSource {
-        EnvSource::prefixed("RSCALE")
+        Self::env_source_from_pairs(env::vars())
+    }
+
+    fn env_source_from_pairs<I, K, V>(iter: I) -> EnvSource
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: Into<String>,
+        V: Into<String>,
+    {
+        EnvSource::from_pairs(iter.into_iter().filter_map(|(name, value)| {
+            let name = name.into();
+            if name == "RSCALE_CONFIG" {
+                None
+            } else {
+                Some((name, value.into()))
+            }
+        }))
+        .prefix("RSCALE")
             .with_alias("RSCALE_BIND_ADDR", "server.bind_addr")
             .with_alias("RSCALE_WEB_ROOT", "server.web_root")
             .with_alias("RSCALE_CONTROL_PRIVATE_KEY", "server.control_private_key")
@@ -1575,6 +1592,27 @@ timezone = "local"
         assert!(!loaded.report().has_warnings());
 
         std::fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn env_source_ignores_rscale_config_path_variable() -> Result<(), Box<dyn Error>> {
+        let loaded = ConfigLoader::new(AppConfig::default())
+            .derive_metadata()
+            .env(AppConfig::env_source_from_pairs([
+                ("RSCALE_CONFIG", "/tmp/rscale.toml"),
+                ("RSCALE_BIND_ADDR", "0.0.0.0:9090"),
+                (
+                    "RSCALE_CONTROL_PRIVATE_KEY",
+                    "privkey:1111111111111111111111111111111111111111111111111111111111111111",
+                ),
+                ("RSCALE_DATABASE_URL", "postgres://localhost/rscale"),
+                ("RSCALE_BREAK_GLASS_TOKEN", "0123456789abcdef01234567"),
+            ]))
+            .load()?;
+
+        assert_eq!(loaded.server.bind_addr, "0.0.0.0:9090");
+        assert_eq!(loaded.database.url.as_deref(), Some("postgres://localhost/rscale"));
         Ok(())
     }
 
