@@ -1,0 +1,84 @@
+services:
+  tailscale:
+    container_name: rscale_tailscale
+    image: tailscale/tailscale:stable
+    restart: unless-stopped
+    hostname: ${TS_HOSTNAME:-rscale-sidecar}
+    environment:
+      - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY to a valid auth key}
+      - TS_HOSTNAME=${TS_HOSTNAME:-rscale-sidecar}
+      - TS_STATE_DIR=/var/lib/tailscale
+      - TS_USERSPACE=false
+      - TS_ACCEPT_DNS=false
+      - TS_EXTRA_ARGS=--login-server=${TS_LOGIN_SERVER:-https://rscale.example.com}
+    volumes:
+      - ./tailscale:/var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    healthcheck:
+      test: ["CMD-SHELL", "tailscale status --json >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+
+  nginx:
+    container_name: rscale_tailscale_app
+    image: nginx:1.29-alpine
+    restart: unless-stopped
+    depends_on:
+      tailscale:
+        condition: service_healthy
+    network_mode: "service:tailscale"
+    command:
+      - /bin/sh
+      - -ec
+      - |
+          cat >/usr/share/nginx/html/index.html <<'EOF'
+          <!doctype html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1" />
+              <title>rscale sidecar test</title>
+              <style>
+                :root { color-scheme: dark; }
+                body {
+                  margin: 0;
+                  min-height: 100vh;
+                  display: grid;
+                  place-items: center;
+                  background: radial-gradient(circle at top, #1f2937, #020617 68%);
+                  color: #e2e8f0;
+                  font: 16px/1.5 Inter, ui-sans-serif, system-ui, sans-serif;
+                }
+                main {
+                  width: min(32rem, calc(100vw - 2rem));
+                  padding: 2rem;
+                  border: 1px solid rgba(148, 163, 184, 0.2);
+                  border-radius: 1rem;
+                  background: rgba(15, 23, 42, 0.72);
+                  box-shadow: 0 20px 60px rgba(2, 6, 23, 0.45);
+                }
+                h1 { margin: 0 0 0.75rem; font-size: 1.5rem; }
+                p { margin: 0; color: #cbd5e1; }
+              </style>
+            </head>
+            <body>
+              <main>
+                <h1>rscale Tailscale sidecar</h1>
+                <p>This container is reachable through the tailnet via the sidecar node.</p>
+              </main>
+            </body>
+          </html>
+          EOF
+          exec nginx -g 'daemon off;'
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

@@ -1,0 +1,123 @@
+[server]
+bind_addr = "0.0.0.0:8080"
+public_base_url = "https://rscale.example.com"
+# Optional: if you statically export `web/` and want rscale to host it directly,
+# point this at the exported `out` directory, e.g.:
+# web_root = "/opt/app/rscale/web/out"
+# Generate once and persist securely:
+# printf 'privkey:%s\n' "$(openssl rand -hex 32)"
+control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
+map_poll_interval_secs = 5
+map_keepalive_interval_secs = 50
+
+[network]
+tailnet_ipv4_range = "100.64.0.0/10"
+tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
+node_online_window_secs = 120
+node_session_ttl_secs = 604800
+
+[database]
+url = "postgres://rscale:rscale@127.0.0.1:5432/rscale"
+max_connections = 20
+
+[auth]
+break_glass_username = "admin"
+# Generate once and store securely:
+# openssl rand -hex 32
+break_glass_token = "replace-with-a-random-32-byte-secret"
+
+[auth.oidc]
+enabled = true
+issuer_url = "https://accounts.example.com"
+client_id = "rscale"
+# Usually provided by your OIDC provider when you create the client.
+# If your provider allows setting a static secret manually:
+# openssl rand -hex 32
+client_secret = "replace-me"
+scopes = ["openid", "profile", "email"]
+allowed_domains = ["example.com"]
+allowed_users = []
+allowed_groups = []
+request_timeout_secs = 5
+total_timeout_secs = 15
+auth_flow_ttl_secs = 600
+validate_discovery_on_startup = true
+
+[control]
+collect_services = true
+pop_browser_url = "https://login.rscale.example.com/device-action"
+
+[[control.dial_plan.candidates]]
+ip = "203.0.113.10"
+dial_start_delay_secs = 0.0
+dial_timeout_secs = 5.0
+priority = 100
+
+[control.display_messages.maintenance]
+title = "Scheduled maintenance"
+text = "Control plane maintenance is in progress. Connectivity may briefly flap."
+severity = "medium"
+impacts_connectivity = true
+
+[control.display_messages.maintenance.primary_action]
+url = "https://status.rscale.example.com"
+label = "Status page"
+
+[control.node_attrs]
+tailnet_display_name = "Example Tailnet"
+default_auto_update = true
+max_key_duration_secs = 2592000
+cache_network_maps = true
+magicdns_peer_aaaa = true
+user_dial_use_routes = true
+
+[control.client_version]
+latest_version = "1.82.0"
+urgent_security_update = false
+notify = true
+notify_url = "https://pkgs.tailscale.com/stable/"
+notify_text = "A newer Tailscale client build is available."
+
+[derp]
+# Optional upstream DERP map sources. Typical production setup:
+# urls = ["https://controlplane.tailscale.com/derpmap/default"]
+# paths = ["/etc/rscale/derp-overrides.json"]
+omit_default_regions = true
+refresh_interval_secs = 300
+request_timeout_secs = 5
+total_timeout_secs = 15
+
+[derp.server]
+enabled = true
+# Generate a dedicated DERP private key; do not reuse server.control_private_key:
+# printf 'privkey:%s\n' "$(openssl rand -hex 32)"
+private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
+# Shared secret for DERP mesh peers; generate once and distribute securely:
+# openssl rand -hex 32
+mesh_key = "3333333333333333333333333333333333333333333333333333333333333333"
+node_name = "900a"
+stun_bind_addr = "0.0.0.0:3478"
+verify_clients = true
+keepalive_interval_secs = 60
+mesh_retry_interval_secs = 5
+
+[[derp.regions]]
+region_id = 900
+region_code = "sha"
+region_name = "Shanghai"
+latitude = 31.2304
+longitude = 121.4737
+
+[[derp.regions.nodes]]
+name = "900a"
+host_name = "derp.rscale.example.com"
+cert_name = "derp.rscale.example.com"
+# Optional internal override used only for DERP server-to-server mesh.
+# mesh_url = "wss://10.0.0.10:443/derp"
+stun_port = 3478
+derp_port = 443
+can_port80 = true
+
+[telemetry]
+filter = "info"
+format = "compact"

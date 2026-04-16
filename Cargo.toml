@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/rscale"]
+default-members = ["crates/rscale"]
+resolver = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+debug = false
+split-debuginfo = "off"
+panic = "unwind"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+
+[workspace.metadata.release]
+allow-branch = ["main"]
+publish = false
+shared-version = true
+tag-prefix = ""
+tag-name = "{{prefix}}{{version}}"
+tag-message = "chore: release version {{version}}"
+pre-release-commit-message = "chore: release version {{version}}"
+pre-release-hook = ["git", "cliff", "--workdir", "../../", "--output", "../../CHANGELOG.md", "--tag", "{{version}}"]

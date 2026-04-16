@@ -1,0 +1,825 @@
+name: e2e
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-official:
+    name: e2e-${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: stable
+            client_image: tailscale/tailscale:stable
+          - suite: unstable
+            client_image: tailscale/tailscale:unstable
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: rscale
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rscale"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_TERM_COLOR: always
+      RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
+      RSCALE_E2E_ARTIFACT_ROOT: ${{ runner.temp }}/rscale-e2e-artifacts
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rscale binaries
+        run: cargo build --locked --bins
+
+      - name: Run compatibility suite
+        env:
+          RSCALE_E2E_SUITE_NAME: ${{ matrix.suite }}
+          RSCALE_E2E_CLIENT_IMAGE: ${{ matrix.client_image }}
+        run: |
+          set -euo pipefail
+
+          ROOT_DIR="${GITHUB_WORKSPACE}"
+          CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
+          SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
+          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT}"
+
+          require_cmd() {
+            local cmd=$1
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              echo "required command not found: $cmd" >&2
+              exit 1
+            fi
+          }
+
+          for cmd in bash curl docker jq mktemp sed tr; do
+            require_cmd "$cmd"
+          done
+
+          RSCALE_BIN="${RSCALE_BIN:-${ROOT_DIR}/target/debug/rscale}"
+          if [[ ! -x "${RSCALE_BIN}" ]]; then
+            cargo build --locked --bins
+          fi
+
+          if [[ ! -x "${RSCALE_BIN}" ]]; then
+            echo "failed to locate built binary under target/debug/rscale" >&2
+            exit 1
+          fi
+
+          SUITE_SLUG=$(printf '%s' "${SUITE_NAME}" | tr -cs 'A-Za-z0-9._-' '-')
+          ARTIFACT_DIR="${ARTIFACT_ROOT}/${SUITE_SLUG}"
+          STATUS_DIR="${ARTIFACT_DIR}/status"
+          mkdir -p "${STATUS_DIR}"
+          echo "e2e artifacts: ${ARTIFACT_DIR}"
+
+          CONTROL_PORT="${RSCALE_E2E_CONTROL_PORT:-18080}"
+          STUN_PORT="${RSCALE_E2E_STUN_PORT:-3478}"
+          LOGIN_HOST="${RSCALE_E2E_LOGIN_HOST:-host.docker.internal}"
+          LOGIN_SERVER="${RSCALE_E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
+          PUBLIC_BASE_URL="${RSCALE_E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
+          DATABASE_URL="${RSCALE_E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
+          ADMIN_TOKEN="${RSCALE_E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
+          BREAK_GLASS_USERNAME="${RSCALE_E2E_BREAK_GLASS_USERNAME:-ci-admin}"
+          NETWORK_NAME="rscale-e2e-${SUITE_SLUG}"
+          CLIENT_A_HOSTNAME="client-a-${SUITE_SLUG}"
+          CLIENT_B_HOSTNAME="client-b-${SUITE_SLUG}"
+
+          CONFIG_PATH="${ARTIFACT_DIR}/rscale-e2e.toml"
+          CONFIG_SUMMARY_PATH="${ARTIFACT_DIR}/config-summary.json"
+          CONFIG_DOCTOR_PATH="${ARTIFACT_DIR}/config-doctor.json"
+          ADMIN_HEALTH_PATH="${ARTIFACT_DIR}/admin-health.json"
+          ADMIN_NODES_PATH="${ARTIFACT_DIR}/admin-nodes.json"
+          RSCALED_LOG="${ARTIFACT_DIR}/rscale-server.log"
+
+          CLIENT_SOCKET="/tmp/tailscale/tailscaled.sock"
+          CLIENT_STATE_DIR="/tmp/tailscale"
+          CLIENT_A_CONTAINER="rscale-e2e-${SUITE_SLUG}-a"
+          CLIENT_B_CONTAINER="rscale-e2e-${SUITE_SLUG}-b"
+
+          retry() {
+            local attempts=$1
+            local delay_secs=$2
+            shift 2
+
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              attempt=$((attempt + 1))
+              sleep "${delay_secs}"
+            done
+          }
+
+          write_config() {
+            cat >"${CONFIG_PATH}" <<EOF
+            [server]
+            bind_addr = "0.0.0.0:${CONTROL_PORT}"
+            public_base_url = "${PUBLIC_BASE_URL}"
+            control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
+            map_poll_interval_secs = 1
+            map_keepalive_interval_secs = 5
+
+            [network]
+            tailnet_ipv4_range = "100.100.0.0/16"
+            tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
+            node_online_window_secs = 30
+            node_session_ttl_secs = 600
+
+            [database]
+            url = "${DATABASE_URL}"
+            max_connections = 8
+
+            [auth]
+            break_glass_username = "${BREAK_GLASS_USERNAME}"
+            break_glass_token = "${ADMIN_TOKEN}"
+
+            [auth.oidc]
+            enabled = false
+
+            [derp]
+            omit_default_regions = true
+            refresh_interval_secs = 300
+            request_timeout_secs = 5
+            total_timeout_secs = 15
+
+            [derp.server]
+            enabled = true
+            private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
+            stun_bind_addr = "0.0.0.0:${STUN_PORT}"
+            verify_clients = true
+            keepalive_interval_secs = 5
+
+            [[derp.regions]]
+            region_id = 900
+            region_code = "ci"
+            region_name = "CI"
+
+            [[derp.regions.nodes]]
+            name = "ci-derp"
+            host_name = "${LOGIN_HOST}"
+            stun_port = ${STUN_PORT}
+            stun_only = false
+            derp_port = ${CONTROL_PORT}
+            insecure_for_tests = true
+            can_port80 = false
+
+            [telemetry]
+            filter = "info"
+            format = "json"
+            EOF
+          }
+
+          docker_image_present() {
+            docker image inspect "$1" >/dev/null 2>&1
+          }
+
+          ensure_client_image() {
+            if ! docker_image_present "${CLIENT_IMAGE}"; then
+              retry 3 5 docker pull "${CLIENT_IMAGE}"
+            fi
+          }
+
+          docker_exec_status_json() {
+            local container=$1
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' status --json"
+          }
+
+          wait_for_http_ready() {
+            curl --fail --silent --show-error "${PUBLIC_BASE_URL}/readyz" >/dev/null
+          }
+
+          wait_for_client_socket() {
+            local container=$1
+            docker exec "${container}" sh -ec "test -S '${CLIENT_SOCKET}'"
+          }
+
+          wait_for_client_running() {
+            local container=$1
+            local output="${STATUS_DIR}/${container}-running.json"
+            docker_exec_status_json "${container}" >"${output}"
+            jq -e '.BackendState == "Running" and ((.Self.TailscaleIPs // []) | length) >= 1' "${output}" >/dev/null
+          }
+
+          wait_for_peer_visibility() {
+            local container=$1
+            local output="${STATUS_DIR}/${container}-peers.json"
+            docker_exec_status_json "${container}" >"${output}"
+            jq -e '(.Peer // {}) | length >= 1' "${output}" >/dev/null
+          }
+
+          record_client_diagnostics() {
+            local container=$1
+            docker logs "${container}" >"${ARTIFACT_DIR}/${container}-docker.log" 2>&1 || true
+            docker exec "${container}" sh -ec "cat '${CLIENT_STATE_DIR}/tailscaled.log'" \
+              >"${ARTIFACT_DIR}/${container}-tailscaled.log" 2>&1 || true
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' version" \
+              >"${ARTIFACT_DIR}/${container}-version.txt" 2>&1 || true
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' netcheck --format=json" \
+              >"${ARTIFACT_DIR}/${container}-netcheck.json" 2>&1 || true
+            docker_exec_status_json "${container}" >"${ARTIFACT_DIR}/${container}-status.json" 2>&1 || true
+          }
+
+          cleanup() {
+            local exit_code=$?
+
+            if [[ -n "${CLIENT_A_CONTAINER:-}" ]]; then
+              record_client_diagnostics "${CLIENT_A_CONTAINER}"
+            fi
+            if [[ -n "${CLIENT_B_CONTAINER:-}" ]]; then
+              record_client_diagnostics "${CLIENT_B_CONTAINER}"
+            fi
+
+            if [[ -n "${RSCALED_PID:-}" ]]; then
+              kill "${RSCALED_PID}" >/dev/null 2>&1 || true
+              wait "${RSCALED_PID}" >/dev/null 2>&1 || true
+            fi
+
+            docker rm -f "${CLIENT_A_CONTAINER}" "${CLIENT_B_CONTAINER}" >/dev/null 2>&1 || true
+            docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+
+            exit "${exit_code}"
+          }
+
+          trap cleanup EXIT
+
+          start_control_plane() {
+            write_config
+
+            "${RSCALE_BIN}" config validate --config "${CONFIG_PATH}" >"${CONFIG_SUMMARY_PATH}"
+            "${RSCALE_BIN}" config doctor --config "${CONFIG_PATH}" >"${CONFIG_DOCTOR_PATH}"
+
+            RSCALE_CONFIG="${CONFIG_PATH}" "${RSCALE_BIN}" server >"${RSCALED_LOG}" 2>&1 &
+            RSCALED_PID=$!
+
+            retry 60 2 wait_for_http_ready
+
+            "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" health >"${ADMIN_HEALTH_PATH}"
+          }
+
+          create_auth_key() {
+            local hostname=$1
+            local output="${ARTIFACT_DIR}/${hostname}-auth-key.json"
+
+            "${RSCALE_BIN}" \
+              admin \
+              --api-url "${PUBLIC_BASE_URL}" \
+              --token "${ADMIN_TOKEN}" \
+              auth-keys create \
+              --description "e2e ${hostname}" >"${output}"
+
+            jq -r '.key' "${output}"
+          }
+
+          start_client() {
+            local container=$1
+
+            docker run \
+              --detach \
+              --name "${container}" \
+              --network "${NETWORK_NAME}" \
+              --add-host "${LOGIN_HOST}:host-gateway" \
+              --tmpfs /tmp \
+              --entrypoint /bin/sh \
+              "${CLIENT_IMAGE}" \
+              -ec "
+                mkdir -p '${CLIENT_STATE_DIR}'
+                exec tailscaled \
+                  --state='${CLIENT_STATE_DIR}/tailscaled.state' \
+                  --socket='${CLIENT_SOCKET}' \
+                  --statedir='${CLIENT_STATE_DIR}' \
+                  --tun=userspace-networking \
+                  --socks5-server=127.0.0.1:1055 \
+                  --outbound-http-proxy-listen=127.0.0.1:1056 \
+                  >'${CLIENT_STATE_DIR}/tailscaled.log' 2>&1
+              " >/dev/null
+
+            retry 30 2 wait_for_client_socket "${container}"
+          }
+
+          bring_client_up() {
+            local container=$1
+            local hostname=$2
+            local auth_key=$3
+
+            docker exec "${container}" sh -ec "
+              tailscale --socket='${CLIENT_SOCKET}' up \
+                --login-server='${LOGIN_SERVER}' \
+                --auth-key='${auth_key}' \
+                --hostname='${hostname}' \
+                --accept-dns=false \
+                --reset
+            " >"${ARTIFACT_DIR}/${container}-up.log" 2>&1
+
+            retry 60 2 wait_for_client_running "${container}"
+          }
+
+          capture_admin_nodes() {
+            "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" nodes list >"${ADMIN_NODES_PATH}"
+          }
+
+          wait_for_admin_nodes() {
+            capture_admin_nodes
+            jq -e \
+              --arg client_a "${CLIENT_A_HOSTNAME}" \
+              --arg client_b "${CLIENT_B_HOSTNAME}" \
+              '
+                [.[].hostname] as $hostnames
+                | (($hostnames | index($client_a)) != null)
+                and (($hostnames | index($client_b)) != null)
+              ' \
+              "${ADMIN_NODES_PATH}" >/dev/null
+          }
+
+          peer_ipv4() {
+            local container=$1
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' ip -4 | head -n 1"
+          }
+
+          tailscale_ping() {
+            local container=$1
+            local target=$2
+            local label=$3
+
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' ping --timeout=10s '${target}'" \
+              >"${ARTIFACT_DIR}/${container}-${label}-ping.log" 2>&1
+          }
+
+          ensure_client_image
+          docker rm -f "${CLIENT_A_CONTAINER}" "${CLIENT_B_CONTAINER}" >/dev/null 2>&1 || true
+          docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+          docker network create "${NETWORK_NAME}" >/dev/null
+
+          start_control_plane
+
+          auth_key_a=$(create_auth_key "${CLIENT_A_HOSTNAME}")
+          auth_key_b=$(create_auth_key "${CLIENT_B_HOSTNAME}")
+
+          start_client "${CLIENT_A_CONTAINER}"
+          start_client "${CLIENT_B_CONTAINER}"
+
+          bring_client_up "${CLIENT_A_CONTAINER}" "${CLIENT_A_HOSTNAME}" "${auth_key_a}"
+          bring_client_up "${CLIENT_B_CONTAINER}" "${CLIENT_B_HOSTNAME}" "${auth_key_b}"
+
+          retry 30 2 wait_for_admin_nodes
+          retry 30 2 wait_for_peer_visibility "${CLIENT_A_CONTAINER}"
+          retry 30 2 wait_for_peer_visibility "${CLIENT_B_CONTAINER}"
+
+          client_b_ip=$(peer_ipv4 "${CLIENT_B_CONTAINER}")
+          client_a_ip=$(peer_ipv4 "${CLIENT_A_CONTAINER}")
+
+          retry 10 3 tailscale_ping "${CLIENT_A_CONTAINER}" "${client_b_ip}" "peer"
+          retry 10 3 tailscale_ping "${CLIENT_B_CONTAINER}" "${client_a_ip}" "peer"
+
+          docker_exec_status_json "${CLIENT_A_CONTAINER}" >"${ARTIFACT_DIR}/${CLIENT_A_CONTAINER}-final-status.json"
+          docker_exec_status_json "${CLIENT_B_CONTAINER}" >"${ARTIFACT_DIR}/${CLIENT_B_CONTAINER}-final-status.json"
+
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-${{ matrix.suite }}-artifacts
+          path: ${{ runner.temp }}/rscale-e2e-artifacts/${{ matrix.suite }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  e2e-head:
+    name: e2e-head
+    if: false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: rscale
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d rscale"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      CARGO_TERM_COLOR: always
+      RSCALE_E2E_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/rscale
+      RSCALE_E2E_ARTIFACT_ROOT: ${{ runner.temp }}/rscale-e2e-artifacts
+      TAILSCALE_HEAD_IMAGE: tailscale-head:ci
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build rscale binaries
+        run: cargo build --locked --bins
+
+      - name: Clone Tailscale HEAD
+        run: git clone --depth 1 https://github.com/tailscale/tailscale.git "${RUNNER_TEMP}/tailscale-head"
+
+      - name: Record Tailscale HEAD revision
+        run: |
+          mkdir -p "${RUNNER_TEMP}/rscale-e2e-artifacts/head"
+          git -C "${RUNNER_TEMP}/tailscale-head" rev-parse HEAD > "${RUNNER_TEMP}/rscale-e2e-artifacts/head/tailscale-head-revision.txt"
+
+      - name: Build Tailscale HEAD image
+        run: |
+          docker build \
+            --tag "${TAILSCALE_HEAD_IMAGE}" \
+            "${RUNNER_TEMP}/tailscale-head"
+
+      - name: Run compatibility suite
+        env:
+          RSCALE_E2E_SUITE_NAME: head
+          RSCALE_E2E_CLIENT_IMAGE: ${{ env.TAILSCALE_HEAD_IMAGE }}
+        run: |
+          set -euo pipefail
+
+          ROOT_DIR="${GITHUB_WORKSPACE}"
+          CLIENT_IMAGE="${RSCALE_E2E_CLIENT_IMAGE}"
+          SUITE_NAME="${RSCALE_E2E_SUITE_NAME}"
+          ARTIFACT_ROOT="${RSCALE_E2E_ARTIFACT_ROOT}"
+
+          require_cmd() {
+            local cmd=$1
+            if ! command -v "$cmd" >/dev/null 2>&1; then
+              echo "required command not found: $cmd" >&2
+              exit 1
+            fi
+          }
+
+          for cmd in bash curl docker jq mktemp sed tr; do
+            require_cmd "$cmd"
+          done
+
+          RSCALE_BIN="${RSCALE_BIN:-${ROOT_DIR}/target/debug/rscale}"
+          if [[ ! -x "${RSCALE_BIN}" ]]; then
+            cargo build --locked --bins
+          fi
+
+          if [[ ! -x "${RSCALE_BIN}" ]]; then
+            echo "failed to locate built binary under target/debug/rscale" >&2
+            exit 1
+          fi
+
+          SUITE_SLUG=$(printf '%s' "${SUITE_NAME}" | tr -cs 'A-Za-z0-9._-' '-')
+          ARTIFACT_DIR="${ARTIFACT_ROOT}/${SUITE_SLUG}"
+          STATUS_DIR="${ARTIFACT_DIR}/status"
+          mkdir -p "${STATUS_DIR}"
+          echo "e2e artifacts: ${ARTIFACT_DIR}"
+
+          CONTROL_PORT="${RSCALE_E2E_CONTROL_PORT:-18080}"
+          STUN_PORT="${RSCALE_E2E_STUN_PORT:-3478}"
+          LOGIN_HOST="${RSCALE_E2E_LOGIN_HOST:-host.docker.internal}"
+          LOGIN_SERVER="${RSCALE_E2E_LOGIN_SERVER:-http://${LOGIN_HOST}:${CONTROL_PORT}}"
+          PUBLIC_BASE_URL="${RSCALE_E2E_PUBLIC_BASE_URL:-http://127.0.0.1:${CONTROL_PORT}}"
+          DATABASE_URL="${RSCALE_E2E_DATABASE_URL:-postgres://postgres:postgres@127.0.0.1:5432/rscale}"
+          ADMIN_TOKEN="${RSCALE_E2E_ADMIN_TOKEN:-0123456789abcdef01234567}"
+          BREAK_GLASS_USERNAME="${RSCALE_E2E_BREAK_GLASS_USERNAME:-ci-admin}"
+          NETWORK_NAME="rscale-e2e-${SUITE_SLUG}"
+          CLIENT_A_HOSTNAME="client-a-${SUITE_SLUG}"
+          CLIENT_B_HOSTNAME="client-b-${SUITE_SLUG}"
+
+          CONFIG_PATH="${ARTIFACT_DIR}/rscale-e2e.toml"
+          CONFIG_SUMMARY_PATH="${ARTIFACT_DIR}/config-summary.json"
+          CONFIG_DOCTOR_PATH="${ARTIFACT_DIR}/config-doctor.json"
+          ADMIN_HEALTH_PATH="${ARTIFACT_DIR}/admin-health.json"
+          ADMIN_NODES_PATH="${ARTIFACT_DIR}/admin-nodes.json"
+          RSCALED_LOG="${ARTIFACT_DIR}/rscale-server.log"
+
+          CLIENT_SOCKET="/tmp/tailscale/tailscaled.sock"
+          CLIENT_STATE_DIR="/tmp/tailscale"
+          CLIENT_A_CONTAINER="rscale-e2e-${SUITE_SLUG}-a"
+          CLIENT_B_CONTAINER="rscale-e2e-${SUITE_SLUG}-b"
+
+          retry() {
+            local attempts=$1
+            local delay_secs=$2
+            shift 2
+
+            local attempt=1
+            until "$@"; do
+              if (( attempt >= attempts )); then
+                return 1
+              fi
+              attempt=$((attempt + 1))
+              sleep "${delay_secs}"
+            done
+          }
+
+          write_config() {
+            cat >"${CONFIG_PATH}" <<EOF
+            [server]
+            bind_addr = "0.0.0.0:${CONTROL_PORT}"
+            public_base_url = "${PUBLIC_BASE_URL}"
+            control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
+            map_poll_interval_secs = 1
+            map_keepalive_interval_secs = 5
+
+            [network]
+            tailnet_ipv4_range = "100.100.0.0/16"
+            tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
+            node_online_window_secs = 30
+            node_session_ttl_secs = 600
+
+            [database]
+            url = "${DATABASE_URL}"
+            max_connections = 8
+
+            [auth]
+            break_glass_username = "${BREAK_GLASS_USERNAME}"
+            break_glass_token = "${ADMIN_TOKEN}"
+
+            [auth.oidc]
+            enabled = false
+
+            [derp]
+            omit_default_regions = true
+            refresh_interval_secs = 300
+            request_timeout_secs = 5
+            total_timeout_secs = 15
+
+            [derp.server]
+            enabled = true
+            private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
+            stun_bind_addr = "0.0.0.0:${STUN_PORT}"
+            verify_clients = true
+            keepalive_interval_secs = 5
+
+            [[derp.regions]]
+            region_id = 900
+            region_code = "ci"
+            region_name = "CI"
+
+            [[derp.regions.nodes]]
+            name = "ci-derp"
+            host_name = "${LOGIN_HOST}"
+            stun_port = ${STUN_PORT}
+            stun_only = false
+            derp_port = ${CONTROL_PORT}
+            insecure_for_tests = true
+            can_port80 = false
+
+            [telemetry]
+            filter = "info"
+            format = "json"
+            EOF
+          }
+
+          docker_image_present() {
+            docker image inspect "$1" >/dev/null 2>&1
+          }
+
+          ensure_client_image() {
+            if ! docker_image_present "${CLIENT_IMAGE}"; then
+              retry 3 5 docker pull "${CLIENT_IMAGE}"
+            fi
+          }
+
+          docker_exec_status_json() {
+            local container=$1
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' status --json"
+          }
+
+          wait_for_http_ready() {
+            curl --fail --silent --show-error "${PUBLIC_BASE_URL}/readyz" >/dev/null
+          }
+
+          wait_for_client_socket() {
+            local container=$1
+            docker exec "${container}" sh -ec "test -S '${CLIENT_SOCKET}'"
+          }
+
+          wait_for_client_running() {
+            local container=$1
+            local output="${STATUS_DIR}/${container}-running.json"
+            docker_exec_status_json "${container}" >"${output}"
+            jq -e '.BackendState == "Running" and ((.Self.TailscaleIPs // []) | length) >= 1' "${output}" >/dev/null
+          }
+
+          wait_for_peer_visibility() {
+            local container=$1
+            local output="${STATUS_DIR}/${container}-peers.json"
+            docker_exec_status_json "${container}" >"${output}"
+            jq -e '(.Peer // {}) | length >= 1' "${output}" >/dev/null
+          }
+
+          record_client_diagnostics() {
+            local container=$1
+            docker logs "${container}" >"${ARTIFACT_DIR}/${container}-docker.log" 2>&1 || true
+            docker exec "${container}" sh -ec "cat '${CLIENT_STATE_DIR}/tailscaled.log'" \
+              >"${ARTIFACT_DIR}/${container}-tailscaled.log" 2>&1 || true
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' version" \
+              >"${ARTIFACT_DIR}/${container}-version.txt" 2>&1 || true
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' netcheck --format=json" \
+              >"${ARTIFACT_DIR}/${container}-netcheck.json" 2>&1 || true
+            docker_exec_status_json "${container}" >"${ARTIFACT_DIR}/${container}-status.json" 2>&1 || true
+          }
+
+          cleanup() {
+            local exit_code=$?
+
+            if [[ -n "${CLIENT_A_CONTAINER:-}" ]]; then
+              record_client_diagnostics "${CLIENT_A_CONTAINER}"
+            fi
+            if [[ -n "${CLIENT_B_CONTAINER:-}" ]]; then
+              record_client_diagnostics "${CLIENT_B_CONTAINER}"
+            fi
+
+            if [[ -n "${RSCALED_PID:-}" ]]; then
+              kill "${RSCALED_PID}" >/dev/null 2>&1 || true
+              wait "${RSCALED_PID}" >/dev/null 2>&1 || true
+            fi
+
+            docker rm -f "${CLIENT_A_CONTAINER}" "${CLIENT_B_CONTAINER}" >/dev/null 2>&1 || true
+            docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+
+            exit "${exit_code}"
+          }
+
+          trap cleanup EXIT
+
+          start_control_plane() {
+            write_config
+
+            "${RSCALE_BIN}" config validate --config "${CONFIG_PATH}" >"${CONFIG_SUMMARY_PATH}"
+            "${RSCALE_BIN}" config doctor --config "${CONFIG_PATH}" >"${CONFIG_DOCTOR_PATH}"
+
+            RSCALE_CONFIG="${CONFIG_PATH}" "${RSCALE_BIN}" server >"${RSCALED_LOG}" 2>&1 &
+            RSCALED_PID=$!
+
+            retry 60 2 wait_for_http_ready
+
+            "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" health >"${ADMIN_HEALTH_PATH}"
+          }
+
+          create_auth_key() {
+            local hostname=$1
+            local output="${ARTIFACT_DIR}/${hostname}-auth-key.json"
+
+            "${RSCALE_BIN}" \
+              admin \
+              --api-url "${PUBLIC_BASE_URL}" \
+              --token "${ADMIN_TOKEN}" \
+              auth-keys create \
+              --description "e2e ${hostname}" >"${output}"
+
+            jq -r '.key' "${output}"
+          }
+
+          start_client() {
+            local container=$1
+
+            docker run \
+              --detach \
+              --name "${container}" \
+              --network "${NETWORK_NAME}" \
+              --add-host "${LOGIN_HOST}:host-gateway" \
+              --tmpfs /tmp \
+              --entrypoint /bin/sh \
+              "${CLIENT_IMAGE}" \
+              -ec "
+                mkdir -p '${CLIENT_STATE_DIR}'
+                exec tailscaled \
+                  --state='${CLIENT_STATE_DIR}/tailscaled.state' \
+                  --socket='${CLIENT_SOCKET}' \
+                  --statedir='${CLIENT_STATE_DIR}' \
+                  --tun=userspace-networking \
+                  --socks5-server=127.0.0.1:1055 \
+                  --outbound-http-proxy-listen=127.0.0.1:1056 \
+                  >'${CLIENT_STATE_DIR}/tailscaled.log' 2>&1
+              " >/dev/null
+
+            retry 30 2 wait_for_client_socket "${container}"
+          }
+
+          bring_client_up() {
+            local container=$1
+            local hostname=$2
+            local auth_key=$3
+
+            docker exec "${container}" sh -ec "
+              tailscale --socket='${CLIENT_SOCKET}' up \
+                --login-server='${LOGIN_SERVER}' \
+                --auth-key='${auth_key}' \
+                --hostname='${hostname}' \
+                --accept-dns=false \
+                --reset
+            " >"${ARTIFACT_DIR}/${container}-up.log" 2>&1
+
+            retry 60 2 wait_for_client_running "${container}"
+          }
+
+          capture_admin_nodes() {
+            "${RSCALE_BIN}" admin --api-url "${PUBLIC_BASE_URL}" --token "${ADMIN_TOKEN}" nodes list >"${ADMIN_NODES_PATH}"
+          }
+
+          wait_for_admin_nodes() {
+            capture_admin_nodes
+            jq -e \
+              --arg client_a "${CLIENT_A_HOSTNAME}" \
+              --arg client_b "${CLIENT_B_HOSTNAME}" \
+              '
+                [.[].hostname] as $hostnames
+                | (($hostnames | index($client_a)) != null)
+                and (($hostnames | index($client_b)) != null)
+              ' \
+              "${ADMIN_NODES_PATH}" >/dev/null
+          }
+
+          peer_ipv4() {
+            local container=$1
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' ip -4 | head -n 1"
+          }
+
+          tailscale_ping() {
+            local container=$1
+            local target=$2
+            local label=$3
+
+            docker exec "${container}" sh -ec \
+              "tailscale --socket='${CLIENT_SOCKET}' ping --timeout=10s '${target}'" \
+              >"${ARTIFACT_DIR}/${container}-${label}-ping.log" 2>&1
+          }
+
+          ensure_client_image
+          docker rm -f "${CLIENT_A_CONTAINER}" "${CLIENT_B_CONTAINER}" >/dev/null 2>&1 || true
+          docker network rm "${NETWORK_NAME}" >/dev/null 2>&1 || true
+          docker network create "${NETWORK_NAME}" >/dev/null
+
+          start_control_plane
+
+          auth_key_a=$(create_auth_key "${CLIENT_A_HOSTNAME}")
+          auth_key_b=$(create_auth_key "${CLIENT_B_HOSTNAME}")
+
+          start_client "${CLIENT_A_CONTAINER}"
+          start_client "${CLIENT_B_CONTAINER}"
+
+          bring_client_up "${CLIENT_A_CONTAINER}" "${CLIENT_A_HOSTNAME}" "${auth_key_a}"
+          bring_client_up "${CLIENT_B_CONTAINER}" "${CLIENT_B_HOSTNAME}" "${auth_key_b}"
+
+          retry 30 2 wait_for_admin_nodes
+          retry 30 2 wait_for_peer_visibility "${CLIENT_A_CONTAINER}"
+          retry 30 2 wait_for_peer_visibility "${CLIENT_B_CONTAINER}"
+
+          client_b_ip=$(peer_ipv4 "${CLIENT_B_CONTAINER}")
+          client_a_ip=$(peer_ipv4 "${CLIENT_A_CONTAINER}")
+
+          retry 10 3 tailscale_ping "${CLIENT_A_CONTAINER}" "${client_b_ip}" "peer"
+          retry 10 3 tailscale_ping "${CLIENT_B_CONTAINER}" "${client_a_ip}" "peer"
+
+          docker_exec_status_json "${CLIENT_A_CONTAINER}" >"${ARTIFACT_DIR}/${CLIENT_A_CONTAINER}-final-status.json"
+          docker_exec_status_json "${CLIENT_B_CONTAINER}" >"${ARTIFACT_DIR}/${CLIENT_B_CONTAINER}-final-status.json"
+
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-head-artifacts
+          path: ${{ runner.temp }}/rscale-e2e-artifacts/head
+          if-no-files-found: warn
+          retention-days: 14

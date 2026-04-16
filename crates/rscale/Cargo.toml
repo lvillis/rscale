@@ -1,0 +1,86 @@
+[package]
+name = "rscale"
+version = "0.1.0"
+description = "Self-hosted Rust control plane for operating a single tailnet with Tailscale clients"
+edition = "2024"
+rust-version = "1.94"
+license = "Apache-2.0"
+readme = "../../README.md"
+homepage = "https://github.com/lvillis/rscale"
+repository = "https://github.com/lvillis/rscale"
+documentation = "https://docs.rs/rscale"
+keywords = ["tailscale", "headscale", "vpn", "wireguard", "control-plane"]
+categories = ["command-line-utilities", "network-programming", "web-programming::http-server"]
+include = [
+    "/Cargo.toml",
+    "/benches/**",
+    "/migrations/**",
+    "/src/**",
+    "/tests/**",
+]
+
+[lints]
+workspace = true
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# Runtime and transport
+axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
+futures-util = { version = "0.3.32", default-features = false, features = ["sink", "std"] }
+http-body-util = { version = "0.1.3", default-features = false }
+httparse = { version = "1.10.1", default-features = false, features = ["std"] }
+hyper = { version = "1.9.0", default-features = false, features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1.20", default-features = false, features = ["http1", "http2", "server", "tokio"] }
+reqx = { version = "0.1.34", default-features = false, features = ["async-tls-rustls-ring"] }
+tokio = { version = "1.52.0", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+tokio-stream = { version = "0.1.17", default-features = false, features = ["sync"] }
+tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }
+tower = { version = "0.5.3", default-features = false, features = ["util"] }
+tower-http = { version = "0.6.6", default-features = false, features = ["fs"] }
+
+# CLI, config, and data modeling
+clap = { version = "4.6.1", default-features = false, features = ["derive", "env", "help", "std", "usage"] }
+serde = { version = "1.0.228", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1.0.149", default-features = false, features = ["std"] }
+serde_urlencoded = { version = "0.7.1", default-features = false }
+tier = { version = "0.1.12", default-features = false, features = ["derive", "toml"] }
+time = { version = "0.3.47", default-features = false, features = ["formatting", "parsing", "std"] }
+thiserror = { version = "2.0.18", default-features = false, features = ["std"] }
+uuid = { version = "1.18.1", default-features = false, features = ["serde", "std", "v4"] }
+
+# Persistence and identity
+jsonwebtoken = { version = "10.3.0", default-features = false, features = ["rust_crypto"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["json", "macros", "migrate", "postgres", "runtime-tokio-rustls"] }
+
+# Protocol and cryptography
+base64 = { version = "0.22.1", default-features = false, features = ["std"] }
+blake2 = { version = "0.11.0-rc.6", default-features = false }
+crc32fast = { version = "1.5.0", default-features = false, features = ["std"] }
+crypto_box = { version = "0.9.1", default-features = false, features = ["alloc", "salsa20"] }
+graviola = { version = "0.3.4", default-features = false }
+hkdf = { version = "0.13.0", default-features = false }
+rcgen = { version = "0.14.7", default-features = false, features = ["ring"] }
+zstd = { version = "0.13.3", default-features = false }
+
+# Telemetry
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt", "json", "std"] }
+
+[dev-dependencies]
+criterion = "0.8.2"
+
+[[bench]]
+name = "policy"
+harness = false
+
+[[bench]]
+name = "map_response"
+harness = false
+
+[[bench]]
+name = "protocol"
+harness = false

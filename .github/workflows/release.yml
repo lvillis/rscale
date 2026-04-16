@@ -1,0 +1,117 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to release, for example 0.1.0
+        required: true
+        type: string
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name || inputs.tag }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build-${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: linux
+            arch: x86_64
+            libc: gnu
+          - target: x86_64-unknown-linux-musl
+            os: linux
+            arch: x86_64
+            libc: musl
+          - target: aarch64-unknown-linux-gnu
+            os: linux
+            arch: aarch64
+            libc: gnu
+          - target: aarch64-unknown-linux-musl
+            os: linux
+            arch: aarch64
+            libc: musl
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.94.0
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: Build binary
+        run: |
+          cross build --locked --release --package rscale --target "${{ matrix.target }}"
+
+      - name: Package archive
+        run: |
+          set -euo pipefail
+
+          asset_stem="rscale-${RELEASE_TAG}-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.libc }}"
+          package_dir="${asset_stem}"
+          mkdir -p "${package_dir}"
+
+          cp "target/${{ matrix.target }}/release/rscale" "${package_dir}/rscale"
+          cp LICENSE "${package_dir}/LICENSE"
+          cp README.md "${package_dir}/README.md"
+
+          tar -czf "${asset_stem}.tar.gz" "${package_dir}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.libc }}
+          path: rscale-${{ env.RELEASE_TAG }}-${{ matrix.os }}-${{ matrix.arch }}-${{ matrix.libc }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: publish-release
+    runs-on: ubuntu-24.04
+    needs: build
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Publish GitHub release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          generate_release_notes: true
