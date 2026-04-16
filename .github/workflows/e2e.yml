@@ -138,62 +138,62 @@ jobs:
           }
 
           write_config() {
-            cat >"${CONFIG_PATH}" <<EOF
-            [server]
-            bind_addr = "0.0.0.0:${CONTROL_PORT}"
-            public_base_url = "${PUBLIC_BASE_URL}"
-            control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
-            map_poll_interval_secs = 1
-            map_keepalive_interval_secs = 5
+          cat >"${CONFIG_PATH}" <<EOF
+          [server]
+          bind_addr = "0.0.0.0:${CONTROL_PORT}"
+          public_base_url = "${PUBLIC_BASE_URL}"
+          control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
+          map_poll_interval_secs = 1
+          map_keepalive_interval_secs = 5
 
-            [network]
-            tailnet_ipv4_range = "100.100.0.0/16"
-            tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
-            node_online_window_secs = 30
-            node_session_ttl_secs = 600
+          [network]
+          tailnet_ipv4_range = "100.100.0.0/16"
+          tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
+          node_online_window_secs = 30
+          node_session_ttl_secs = 600
 
-            [database]
-            url = "${DATABASE_URL}"
-            max_connections = 8
+          [database]
+          url = "${DATABASE_URL}"
+          max_connections = 8
 
-            [auth]
-            break_glass_username = "${BREAK_GLASS_USERNAME}"
-            break_glass_token = "${ADMIN_TOKEN}"
+          [auth]
+          break_glass_username = "${BREAK_GLASS_USERNAME}"
+          break_glass_token = "${ADMIN_TOKEN}"
 
-            [auth.oidc]
-            enabled = false
+          [auth.oidc]
+          enabled = false
 
-            [derp]
-            omit_default_regions = true
-            refresh_interval_secs = 300
-            request_timeout_secs = 5
-            total_timeout_secs = 15
+          [derp]
+          omit_default_regions = true
+          refresh_interval_secs = 300
+          request_timeout_secs = 5
+          total_timeout_secs = 15
 
-            [derp.server]
-            enabled = true
-            private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
-            stun_bind_addr = "0.0.0.0:${STUN_PORT}"
-            verify_clients = true
-            keepalive_interval_secs = 5
+          [derp.server]
+          enabled = true
+          private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
+          stun_bind_addr = "0.0.0.0:${STUN_PORT}"
+          verify_clients = true
+          keepalive_interval_secs = 5
 
-            [[derp.regions]]
-            region_id = 900
-            region_code = "ci"
-            region_name = "CI"
+          [[derp.regions]]
+          region_id = 900
+          region_code = "ci"
+          region_name = "CI"
 
-            [[derp.regions.nodes]]
-            name = "ci-derp"
-            host_name = "${LOGIN_HOST}"
-            stun_port = ${STUN_PORT}
-            stun_only = false
-            derp_port = ${CONTROL_PORT}
-            insecure_for_tests = true
-            can_port80 = false
+          [[derp.regions.nodes]]
+          name = "ci-derp"
+          host_name = "${LOGIN_HOST}"
+          stun_port = ${STUN_PORT}
+          stun_only = false
+          derp_port = ${CONTROL_PORT}
+          insecure_for_tests = true
+          can_port80 = false
 
-            [telemetry]
-            filter = "info"
-            format = "json"
-            EOF
+          [telemetry]
+          filter = "info"
+          format = "json"
+EOF
           }
 
           docker_image_present() {
@@ -546,62 +546,62 @@ jobs:
           }
 
           write_config() {
-            cat >"${CONFIG_PATH}" <<EOF
-            [server]
-            bind_addr = "0.0.0.0:${CONTROL_PORT}"
-            public_base_url = "${PUBLIC_BASE_URL}"
-            control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
-            map_poll_interval_secs = 1
-            map_keepalive_interval_secs = 5
+          cat >"${CONFIG_PATH}" <<EOF
+          [server]
+          bind_addr = "0.0.0.0:${CONTROL_PORT}"
+          public_base_url = "${PUBLIC_BASE_URL}"
+          control_private_key = "privkey:1111111111111111111111111111111111111111111111111111111111111111"
+          map_poll_interval_secs = 1
+          map_keepalive_interval_secs = 5
 
-            [network]
-            tailnet_ipv4_range = "100.100.0.0/16"
-            tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
-            node_online_window_secs = 30
-            node_session_ttl_secs = 600
+          [network]
+          tailnet_ipv4_range = "100.100.0.0/16"
+          tailnet_ipv6_range = "fd7a:115c:a1e0::/48"
+          node_online_window_secs = 30
+          node_session_ttl_secs = 600
 
-            [database]
-            url = "${DATABASE_URL}"
-            max_connections = 8
+          [database]
+          url = "${DATABASE_URL}"
+          max_connections = 8
 
-            [auth]
-            break_glass_username = "${BREAK_GLASS_USERNAME}"
-            break_glass_token = "${ADMIN_TOKEN}"
+          [auth]
+          break_glass_username = "${BREAK_GLASS_USERNAME}"
+          break_glass_token = "${ADMIN_TOKEN}"
 
-            [auth.oidc]
-            enabled = false
+          [auth.oidc]
+          enabled = false
 
-            [derp]
-            omit_default_regions = true
-            refresh_interval_secs = 300
-            request_timeout_secs = 5
-            total_timeout_secs = 15
+          [derp]
+          omit_default_regions = true
+          refresh_interval_secs = 300
+          request_timeout_secs = 5
+          total_timeout_secs = 15
 
-            [derp.server]
-            enabled = true
-            private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
-            stun_bind_addr = "0.0.0.0:${STUN_PORT}"
-            verify_clients = true
-            keepalive_interval_secs = 5
+          [derp.server]
+          enabled = true
+          private_key = "privkey:2222222222222222222222222222222222222222222222222222222222222222"
+          stun_bind_addr = "0.0.0.0:${STUN_PORT}"
+          verify_clients = true
+          keepalive_interval_secs = 5
 
-            [[derp.regions]]
-            region_id = 900
-            region_code = "ci"
-            region_name = "CI"
+          [[derp.regions]]
+          region_id = 900
+          region_code = "ci"
+          region_name = "CI"
 
-            [[derp.regions.nodes]]
-            name = "ci-derp"
-            host_name = "${LOGIN_HOST}"
-            stun_port = ${STUN_PORT}
-            stun_only = false
-            derp_port = ${CONTROL_PORT}
-            insecure_for_tests = true
-            can_port80 = false
+          [[derp.regions.nodes]]
+          name = "ci-derp"
+          host_name = "${LOGIN_HOST}"
+          stun_port = ${STUN_PORT}
+          stun_only = false
+          derp_port = ${CONTROL_PORT}
+          insecure_for_tests = true
+          can_port80 = false
 
-            [telemetry]
-            filter = "info"
-            format = "json"
-            EOF
+          [telemetry]
+          filter = "info"
+          format = "json"
+EOF
           }
 
           docker_image_present() {
