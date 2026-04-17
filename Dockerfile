@@ -1,3 +1,5 @@
+ARG RUST_VERSION=1.95.0
+
 FROM node:22-trixie-slim AS web-builder
 
 ENV PNPM_HOME=/pnpm
@@ -14,9 +16,6 @@ RUN --mount=type=cache,target=/pnpm/store \
 COPY web/ ./
 RUN --mount=type=cache,target=/pnpm/store \
     pnpm build
-
-
-ARG RUST_VERSION=1.95.0
 
 FROM rust:${RUST_VERSION}-trixie AS rust-builder
 
