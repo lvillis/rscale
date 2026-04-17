@@ -31,7 +31,9 @@ COPY crates/rscale ./crates/rscale
 RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cargo-git-${TARGETPLATFORM},target=/usr/local/cargo/git/db,sharing=locked \
     --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/work/target,sharing=locked \
-    cargo build --release --package rscale
+    cargo build --release --package rscale \
+    && mkdir -p /out \
+    && cp /work/target/release/rscale /out/rscale
 
 
 FROM debian:trixie-slim AS runtime
@@ -46,7 +48,7 @@ RUN useradd --create-home --home-dir /app --shell /usr/sbin/nologin rscale
 
 WORKDIR /app
 
-COPY --from=rust-builder /work/target/release/rscale /usr/local/bin/rscale
+COPY --from=rust-builder /out/rscale /usr/local/bin/rscale
 COPY --from=web-builder /work/web/out /app/web/out
 COPY config/config.example.toml /app/config/config.example.toml
 
