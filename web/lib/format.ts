@@ -1,8 +1,36 @@
-export type FormatLocale = "zh" | "en"
+import type { ConsoleLocale } from "@/lib/console-i18n"
+
+const UPTIME_UNITS: Record<ConsoleLocale, { day: string; hour: string; minute: string }> = {
+  zh: {
+    day: "天",
+    hour: "小时",
+    minute: "分钟",
+  },
+  en: {
+    day: "d",
+    hour: "h",
+    minute: "m",
+  },
+  de: {
+    day: "Tg",
+    hour: "Std",
+    minute: "Min",
+  },
+}
+
+export type FormatLocale = ConsoleLocale
 export type FormatTimeZone = "local" | "utc"
 
 function resolveLocale(locale: FormatLocale) {
-  return locale === "zh" ? "zh-CN" : "en-US"
+  if (locale === "zh") {
+    return "zh-CN"
+  }
+
+  if (locale === "de") {
+    return "de-DE"
+  }
+
+  return "en-US"
 }
 
 function resolveTimeZone(timezone: FormatTimeZone) {
@@ -52,18 +80,12 @@ export function formatUptime(totalSeconds: number, locale: FormatLocale = "zh") 
   const hours = Math.floor((totalSeconds % 86_400) / 3_600)
   const minutes = Math.floor((totalSeconds % 3_600) / 60)
 
-  const parts =
-    locale === "zh"
-      ? [
-          days > 0 ? `${days} 天` : null,
-          hours > 0 ? `${hours} 小时` : null,
-          `${minutes} 分钟`,
-        ]
-      : [
-          days > 0 ? `${days}d` : null,
-          hours > 0 ? `${hours}h` : null,
-          `${minutes}m`,
-        ]
+  const units = UPTIME_UNITS[locale]
+  const parts = [
+    days > 0 ? `${days} ${units.day}` : null,
+    hours > 0 ? `${hours} ${units.hour}` : null,
+    `${minutes} ${units.minute}`,
+  ]
 
   return parts.join(" ")
 }

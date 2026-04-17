@@ -71,7 +71,7 @@ export function LoginPage() {
         router.replace(nextPath)
       }
     } catch (submitError) {
-      setError(getConsoleErrorMessage(submitError, copy.errorUnknown))
+      setError(getConsoleErrorMessage(submitError, locale, copy.errorUnknown))
     } finally {
       setSubmitting(false)
     }

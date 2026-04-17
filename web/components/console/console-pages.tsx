@@ -3,17 +3,22 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query"
 import {
   Activity,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   Copy,
   Database,
+  Eye,
+  EyeOff,
   Globe2,
   KeyRound,
   Network,
+  PencilLine,
+  Save,
   ShieldCheck,
   X,
 } from "lucide-react"
-import { useState, type FormEvent } from "react"
+import { useMemo, useState, type FormEvent } from "react"
 
 import { AuthKeyTable } from "@/components/auth-key-table"
 import { NodeTable } from "@/components/node-table"
@@ -31,6 +36,7 @@ import type {
   IssuedAuthKey,
   Node,
   Route,
+  UpdateNodeInput,
 } from "@/lib/types"
 import { CONSOLE_COPY } from "./strings"
 import { useConsole, getConsoleErrorMessage } from "./console-context"
@@ -45,6 +51,7 @@ import {
   PanelRefreshAction,
   PanelState,
   SearchField,
+  StatusPill,
 } from "./primitives"
 import { focusCollectionItem } from "./interaction"
 
@@ -53,6 +60,132 @@ function splitTags(raw: string) {
     .split(/[\n,]/)
     .map((value) => value.trim())
     .filter(Boolean)
+}
+
+type AuthKeyExpiryPreset = "24h" | "7d" | "30d" | "never" | "custom"
+
+type AuthKeyDraft = {
+  description: string
+  tags: string
+  reusable: boolean
+  ephemeral: boolean
+  expiresPreset: AuthKeyExpiryPreset
+  customExpiresAt: string
+}
+
+type AuthKeyDraftErrors = Partial<Record<"description" | "tags" | "expiresAt", string>>
+
+const DEFAULT_AUTH_KEY_DRAFT: AuthKeyDraft = {
+  description: "",
+  tags: "",
+  reusable: false,
+  ephemeral: false,
+  expiresPreset: "30d",
+  customExpiresAt: "",
+}
+
+const AUTH_KEY_EXPIRY_PRESETS: Array<{
+  value: AuthKeyExpiryPreset
+  seconds?: number
+}> = [
+  { value: "24h", seconds: 24 * 60 * 60 },
+  { value: "7d", seconds: 7 * 24 * 60 * 60 },
+  { value: "30d", seconds: 30 * 24 * 60 * 60 },
+  { value: "never" },
+  { value: "custom" },
+]
+
+function toDateTimeLocalValue(unixSeconds: number) {
+  const date = new Date(unixSeconds * 1000)
+  const pad = (value: number) => String(value).padStart(2, "0")
+
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(
+    date.getHours()
+  )}:${pad(date.getMinutes())}`
+}
+
+function parseCustomExpiry(value: string) {
+  if (!value.trim()) {
+    return null
+  }
+
+  const timestamp = new Date(value).getTime()
+  if (Number.isNaN(timestamp)) {
+    return null
+  }
+
+  return Math.floor(timestamp / 1000)
+}
+
+function resolveDraftExpiryUnixSecs(draft: AuthKeyDraft) {
+  const preset = AUTH_KEY_EXPIRY_PRESETS.find((candidate) => candidate.value === draft.expiresPreset)
+  if (!preset) {
+    return undefined
+  }
+
+  if (preset.value === "never") {
+    return undefined
+  }
+
+  if (preset.value === "custom") {
+    const customExpiry = parseCustomExpiry(draft.customExpiresAt)
+    return customExpiry ?? null
+  }
+
+  return Math.floor(Date.now() / 1000) + (preset.seconds ?? 0)
+}
+
+function validateAuthKeyDraft(
+  draft: AuthKeyDraft,
+  tags: string[],
+  messages: {
+    descriptionBlank: string
+    tagPrefix: string
+    tagEmpty: string
+    tagWhitespace: string
+    expiryRequired: string
+    expiryInvalid: string
+    expiryPast: string
+  }
+): AuthKeyDraftErrors {
+  const errors: AuthKeyDraftErrors = {}
+
+  if (draft.description.length > 0 && draft.description.trim().length === 0) {
+    errors.description = messages.descriptionBlank
+  }
+
+  for (const tag of tags) {
+    if (!tag.startsWith("tag:")) {
+      errors.tags = messages.tagPrefix
+      break
+    }
+
+    const tagName = tag.slice(4).trim()
+    if (!tagName) {
+      errors.tags = messages.tagEmpty
+      break
+    }
+
+    if (/\s/.test(tagName)) {
+      errors.tags = messages.tagWhitespace
+      break
+    }
+  }
+
+  if (draft.expiresPreset === "custom") {
+    if (!draft.customExpiresAt.trim()) {
+      errors.expiresAt = messages.expiryRequired
+    } else {
+      const customExpiry = parseCustomExpiry(draft.customExpiresAt)
+      if (customExpiry === null) {
+        errors.expiresAt = messages.expiryInvalid
+      } else if (customExpiry <= Math.floor(Date.now() / 1000)) {
+        errors.expiresAt = messages.expiryPast
+      }
+    }
+  }
+
+  return errors
 }
 
 type FeedbackState = {
@@ -112,7 +245,15 @@ async function copyCurrentLocation(
 }
 
 export function OverviewPage() {
-  const { settings, connectionReady, queryScope, locale } = useConsole()
+  const {
+    settings,
+    connectionReady,
+    queryScope,
+    locale,
+    timezone,
+    refreshAll,
+    isRefreshing,
+  } = useConsole()
   const copy = CONSOLE_COPY[locale]
 
   const healthQuery = useQuery({
@@ -133,38 +274,134 @@ export function OverviewPage() {
     refetchInterval: 20_000,
     enabled: connectionReady,
   })
+  const nodesQuery = useQuery({
+    queryKey: [...queryScope, "nodes"],
+    queryFn: () => adminApi.getNodes(settings),
+    refetchInterval: 15_000,
+    enabled: connectionReady,
+  })
+  const routesQuery = useQuery({
+    queryKey: [...queryScope, "routes"],
+    queryFn: () => adminApi.getRoutes(settings),
+    refetchInterval: 20_000,
+    enabled: connectionReady,
+  })
+  const auditQuery = useQuery({
+    queryKey: [...queryScope, "overview-audit-events"],
+    queryFn: () => adminApi.getAuditEvents(settings, 5),
+    refetchInterval: 20_000,
+    enabled: connectionReady,
+  })
 
   const health = healthQuery.data
   const config = configQuery.data
   const derp = derpQuery.data
-  const derpRegions = Object.values(derp?.effective_map.Regions ?? {})
+  const nodes = nodesQuery.data ?? []
+  const routes = routesQuery.data ?? []
+  const recentAuditEvents = auditQuery.data ?? []
+  const derpRegions = derp?.effective_region_count ?? 0
+  const onlineNodes = nodes.filter((node) => node.status === "online").length
+  const pendingRoutes = routes.filter((route) => route.approval === "pending").length
+  const warningCount =
+    Number(Boolean(health?.config_has_warnings)) +
+    Number(Boolean(derp?.last_refresh_error)) +
+    Number(health ? !health.database_ready : false) +
+    Number(health ? !health.admin_auth_configured : false)
+  const hasOverviewLoadFailure =
+    (!health && Boolean(healthQuery.error)) ||
+    (!config && Boolean(configQuery.error)) ||
+    (!derp && Boolean(derpQuery.error))
+
+  const hasBlockingIssue = Boolean(
+    health && (!health.database_ready || Boolean(derp?.last_refresh_error))
+  )
+  const hasWarningState = Boolean(
+    health &&
+      !hasBlockingIssue &&
+      (health.config_has_warnings || !health.admin_auth_configured)
+  )
+
+  const overviewStatus = hasOverviewLoadFailure
+    ? "attention"
+    : !health || !config || !derp
+      ? "waiting"
+      : hasBlockingIssue
+        ? "attention"
+        : hasWarningState
+          ? "degraded"
+          : "healthy"
+
+  const overviewStatusLabel = copy.overview.status[overviewStatus]
+
+  const summaryItems = [
+    {
+      label: copy.overview.summary.controlPlane,
+      value: health ? `${health.service} ${health.version}` : "—",
+    },
+    {
+      label: copy.overview.summary.database,
+      value: health
+        ? health.database_ready
+          ? copy.common.ok
+          : copy.overview.status.attention
+        : "—",
+    },
+    {
+      label: copy.overview.summary.adminAuth,
+      value: health
+        ? health.admin_auth_configured
+          ? copy.common.configured
+          : copy.common.unconfigured
+        : "—",
+    },
+    {
+      label: copy.overview.summary.oidc,
+      value: health
+        ? health.oidc_enabled
+          ? copy.common.enabled
+          : copy.common.disabled
+        : "—",
+    },
+    {
+      label: copy.overview.summary.webRoot,
+      value: config
+        ? config.summary.web_root_configured
+          ? copy.common.configured
+          : copy.common.unconfigured
+        : "—",
+    },
+    {
+      label: copy.overview.summary.derpRefresh,
+      value: derp
+        ? derp.last_refresh_error
+          ? copy.overview.status.attention
+          : copy.common.ok
+        : "—",
+    },
+  ]
 
   return (
     <div className="space-y-6">
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-        <MetricTile label={copy.overview.metrics.online} value="—" icon={Activity} />
         <MetricTile
-          label={copy.overview.metrics.config}
-          value={config ? copy.common.ok : configQuery.isPending ? "…" : "—"}
-          icon={Database}
+          label={copy.overview.metrics.online}
+          value={nodesQuery.isPending && nodes.length === 0 ? "…" : String(onlineNodes)}
+          icon={Activity}
         />
         <MetricTile
-          label={copy.overview.metrics.derp}
-          value={derp ? String(derpRegions.length) : derpQuery.isPending ? "…" : "—"}
+          label={copy.overview.metrics.pendingRoutes}
+          value={routesQuery.isPending && routes.length === 0 ? "…" : String(pendingRoutes)}
+          icon={Network}
+        />
+        <MetricTile
+          label={copy.overview.metrics.derpFailures}
+          value={derp ? String(derp.refresh_failures_total) : derpQuery.isPending ? "…" : "—"}
           icon={Globe2}
         />
         <MetricTile
           label={copy.overview.metrics.warnings}
-          value={
-            health
-              ? health.config_has_warnings
-                ? copy.common.yes
-                : copy.common.no
-              : healthQuery.isPending
-                ? "…"
-                : "—"
-          }
-          icon={Network}
+          value={health || derp ? String(warningCount) : healthQuery.isPending ? "…" : "—"}
+          icon={Database}
         />
         <MetricTile
           label={copy.overview.metrics.uptime}
@@ -175,222 +412,137 @@ export function OverviewPage() {
         />
       </div>
 
-      <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
+      <div className="grid gap-6 xl:grid-cols-[1.05fr_0.95fr]">
         <Panel
-          title={copy.overview.panels.healthTitle}
-          eyebrow={copy.overview.panels.healthEyebrow}
+          title={copy.overview.sections.summaryTitle}
           action={
-            <PanelRefreshAction
-              label={copy.refresh}
-              refreshingLabel={copy.refreshing}
-              refreshing={healthQuery.isFetching}
-              onRefresh={() => void healthQuery.refetch()}
-            />
-          }
-        >
-          {healthQuery.isPending && !health ? (
-            <PanelState mode="loading" message={copy.common.loading} />
-          ) : healthQuery.error && !health ? (
-            <PanelState
-              mode="error"
-              message={getConsoleErrorMessage(healthQuery.error, copy.common.loadFailed)}
-              actionLabel={copy.common.retry}
-              onAction={() => void healthQuery.refetch()}
-            />
-          ) : health ? (
-            <KeyValueGrid
-              items={[
-                { label: copy.overview.health.service, value: health.service },
-                { label: copy.overview.health.version, value: health.version },
-                { label: copy.overview.health.bind, value: health.bind_addr },
-                { label: copy.overview.health.log, value: health.log_format },
-                {
-                  label: copy.overview.health.uptime,
-                  value: formatUptime(health.uptime_seconds, locale),
-                },
-                {
-                  label: copy.overview.health.configWarnings,
-                  value: health.config_has_warnings
-                    ? copy.overview.health.present
-                    : copy.overview.health.absent,
-                },
-              ]}
-            />
-          ) : null}
-        </Panel>
-
-        <Panel
-          title={copy.overview.panels.controlTitle}
-          eyebrow={copy.overview.panels.controlEyebrow}
-          action={
-            <PanelRefreshAction
-              label={copy.refresh}
-              refreshingLabel={copy.refreshing}
-              refreshing={configQuery.isFetching}
-              onRefresh={() => void configQuery.refetch()}
-            />
-          }
-        >
-          {configQuery.isPending && !config ? (
-            <PanelState mode="loading" message={copy.common.loading} />
-          ) : configQuery.error && !config ? (
-            <PanelState
-              mode="error"
-              message={getConsoleErrorMessage(configQuery.error, copy.common.loadFailed)}
-              actionLabel={copy.common.retry}
-              onAction={() => void configQuery.refetch()}
-            />
-          ) : config ? (
-            <KeyValueGrid
-              items={[
-                {
-                  label: copy.overview.control.tailnetIpv4,
-                  value: config.summary.tailnet_ipv4_range,
-                },
-                {
-                  label: copy.overview.control.tailnetIpv6,
-                  value: config.summary.tailnet_ipv6_range,
-                },
-                {
-                  label: copy.overview.control.controlProtocol,
-                  value: config.summary.control_protocol_enabled
-                    ? copy.common.enabled
-                    : copy.common.disabled,
-                },
-                {
-                  label: copy.overview.control.adminAuth,
-                  value: config.summary.admin_auth_configured
-                    ? copy.common.configured
-                    : copy.common.unconfigured,
-                },
-                {
-                  label: copy.overview.control.webRoot,
-                  value: config.summary.web_root_configured
-                    ? copy.common.configured
-                    : copy.common.unconfigured,
-                },
-                {
-                  label: copy.overview.control.stun,
-                  value: config.summary.derp_stun_bind_addr || copy.common.unconfigured,
-                },
-              ]}
-            />
-          ) : null}
-        </Panel>
-      </div>
-
-      <div className="grid gap-6 xl:grid-cols-[0.92fr_1.08fr]">
-        <Panel
-          title={copy.overview.panels.derpTitle}
-          eyebrow={copy.overview.panels.derpEyebrow}
-          action={
-            <PanelRefreshAction
-              label={copy.refresh}
-              refreshingLabel={copy.refreshing}
-              refreshing={derpQuery.isFetching}
-              onRefresh={() => void derpQuery.refetch()}
-            />
-          }
-        >
-          {derpQuery.isPending && !derp ? (
-            <PanelState mode="loading" message={copy.common.loading} />
-          ) : derpQuery.error && !derp ? (
-            <PanelState
-              mode="error"
-              message={getConsoleErrorMessage(derpQuery.error, copy.common.loadFailed)}
-              actionLabel={copy.common.retry}
-              onAction={() => void derpQuery.refetch()}
-            />
-          ) : derp ? (
-            <div className="space-y-4">
-              <div className="grid gap-3 sm:grid-cols-3">
-                <div className="console-surface-soft rounded-[12px] p-4">
-                  <div className="console-eyebrow text-[11px] font-[510] tracking-[0.16em] uppercase">
-                    {copy.overview.derp.regions}
-                  </div>
-                  <div className="mt-2 text-[24px] font-[510] tracking-[-0.4px] text-foreground">
-                    {derpRegions.length}
-                  </div>
-                </div>
-                <div className="console-surface-soft rounded-[12px] p-4">
-                  <div className="console-eyebrow text-[11px] font-[510] tracking-[0.16em] uppercase">
-                    {copy.overview.derp.sources}
-                  </div>
-                  <div className="mt-2 text-[24px] font-[510] tracking-[-0.4px] text-foreground">
-                    {derp.source_count}
-                  </div>
-                </div>
-                <div className="console-surface-soft rounded-[12px] p-4">
-                  <div className="console-eyebrow text-[11px] font-[510] tracking-[0.16em] uppercase">
-                    {copy.overview.derp.failures}
-                  </div>
-                  <div className="mt-2 text-[24px] font-[510] tracking-[-0.4px] text-foreground">
-                    {derp.refresh_failures_total}
-                  </div>
-                </div>
-              </div>
-
-              <div className="space-y-3">
-                {derpRegions.map((region) => (
-                  <div
-                    key={region.RegionID}
-                    className="console-surface-soft rounded-[12px] p-4"
-                  >
-                    <div className="flex items-start justify-between gap-4">
-                      <div>
-                        <div className="text-[15px] font-[510] tracking-[-0.18px] text-foreground">
-                          {region.RegionName}
-                        </div>
-                        <div className="mt-1 text-[12px] text-muted-foreground">
-                          {copy.overview.derp.regionSummary(region.RegionCode, region.Nodes.length)}
-                        </div>
-                      </div>
-                      <Badge variant="outline">{region.RegionID}</Badge>
-                    </div>
-                    <div className="mt-3 flex flex-wrap gap-2">
-                      {region.Nodes.map((node) => (
-                        <Badge key={node.Name} variant="secondary">
-                          {node.HostName}:{node.DERPPort || 443}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
+            <div className="flex items-center gap-3">
+              <StatusPill
+                label={overviewStatusLabel}
+                healthy={overviewStatus === "healthy"}
+              />
+              <PanelRefreshAction
+                label={copy.refresh}
+                refreshingLabel={copy.refreshing}
+                refreshing={isRefreshing}
+                onRefresh={refreshAll}
+              />
             </div>
-          ) : null}
-        </Panel>
-
-        <Panel
-          title={copy.overview.panels.doctorTitle}
-          eyebrow={copy.overview.panels.doctorEyebrow}
-          action={
-            <PanelRefreshAction
-              label={copy.refresh}
-              refreshingLabel={copy.refreshing}
-              refreshing={configQuery.isFetching}
-              onRefresh={() => void configQuery.refetch()}
-            />
           }
         >
-          {configQuery.isPending && !config ? (
+          {healthQuery.isPending && !health && configQuery.isPending && !config && derpQuery.isPending && !derp ? (
             <PanelState mode="loading" message={copy.common.loading} />
-          ) : configQuery.error && !config ? (
+          ) : hasOverviewLoadFailure ? (
             <PanelState
               mode="error"
-              message={getConsoleErrorMessage(configQuery.error, copy.common.loadFailed)}
+              message={getConsoleErrorMessage(
+                healthQuery.error ?? configQuery.error ?? derpQuery.error,
+                locale,
+                copy.common.loadFailed
+              )}
               actionLabel={copy.common.retry}
-              onAction={() => void configQuery.refetch()}
+              onAction={refreshAll}
             />
           ) : (
-            <Textarea
-              readOnly
-              value={JSON.stringify(config?.doctor ?? {}, null, 2)}
-              className="min-h-[320px] border-border bg-[var(--surface-soft)] font-mono text-[12px]"
+            <div className="space-y-3">
+              {summaryItems.map((item) => (
+                <div
+                  key={item.label}
+                  className="flex items-center justify-between gap-4 rounded-[12px] border border-border/70 px-4 py-3"
+                >
+                  <div className="text-[13px] font-[510] text-foreground">{item.label}</div>
+                  <div className="text-right text-[13px] text-muted-foreground">{item.value}</div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title={copy.overview.sections.activityTitle}>
+          {auditQuery.isPending && recentAuditEvents.length === 0 ? (
+            <PanelState mode="loading" message={copy.common.loading} />
+          ) : auditQuery.error && recentAuditEvents.length === 0 ? (
+            <PanelState
+              mode="error"
+              message={getConsoleErrorMessage(auditQuery.error, locale, copy.common.loadFailed)}
+              actionLabel={copy.common.retry}
+              onAction={() => void auditQuery.refetch()}
             />
+          ) : recentAuditEvents.length === 0 ? (
+            <PanelState mode="empty" message={copy.overview.activity.empty} />
+          ) : (
+            <div className="space-y-3">
+              {recentAuditEvents.map((event) => (
+                <div
+                  key={event.id}
+                  className="rounded-[12px] border border-border/70 px-4 py-3"
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0 space-y-1">
+                      <div className="text-[13px] font-[510] text-foreground">
+                        {copy.audit.kindNames[event.kind]}
+                      </div>
+                      <div className="text-[12px] text-muted-foreground">
+                        {event.actor.subject}
+                        {copy.audit.actorSeparator}
+                        {event.target}
+                      </div>
+                    </div>
+                    <div className="shrink-0 whitespace-nowrap pl-3 text-right text-[12px] text-muted-foreground">
+                      {formatDateTime(event.occurred_at_unix_secs, locale, timezone)}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
           )}
         </Panel>
       </div>
+
+      <Panel title={copy.overview.sections.diagnosticsTitle}>
+          {configQuery.isPending && !config ? (
+            <PanelState mode="loading" message={copy.common.loading} />
+          ) : configQuery.error && !config ? (
+            <PanelState
+              mode="error"
+              message={getConsoleErrorMessage(configQuery.error, locale, copy.common.loadFailed)}
+              actionLabel={copy.common.retry}
+              onAction={() => void configQuery.refetch()}
+            />
+          ) : config && health && derp ? (
+            <div className="space-y-4">
+              <KeyValueGrid
+                items={[
+                  { label: copy.overview.summary.bind, value: health.bind_addr },
+                  { label: copy.overview.summary.logFormat, value: health.log_format },
+                  { label: copy.overview.summary.logTimezone, value: health.log_timezone },
+                  { label: copy.overview.summary.tailnetIpv4, value: config.summary.tailnet_ipv4_range },
+                  { label: copy.overview.summary.tailnetIpv6, value: config.summary.tailnet_ipv6_range },
+                  {
+                    label: copy.overview.summary.stun,
+                    value: config.summary.derp_stun_bind_addr || copy.common.unconfigured,
+                  },
+                  {
+                    label: copy.overview.summary.refreshInterval,
+                    value: `${config.summary.derp_refresh_interval_secs}${copy.common.seconds}`,
+                  },
+                  { label: copy.overview.summary.regions, value: String(derpRegions) },
+                  { label: copy.overview.summary.sources, value: String(derp.source_count) },
+                ]}
+              />
+              <details className="group rounded-[12px] border border-border/70 px-4 py-3">
+                <summary className="cursor-pointer list-none text-[13px] font-[510] text-foreground">
+                  {copy.overview.sections.doctorToggle}
+                </summary>
+                <Textarea
+                  readOnly
+                  value={JSON.stringify(config.doctor ?? {}, null, 2)}
+                  className="mt-3 min-h-[240px] border-border bg-[var(--surface-soft)] font-mono text-[12px]"
+                />
+              </details>
+            </div>
+          ) : null}
+      </Panel>
     </div>
   )
 }
@@ -410,6 +562,12 @@ export function NodesPage() {
   const [feedback, setFeedback] = useState<FeedbackState | null>(null)
   const [selectionVersion, setSelectionVersion] = useState(0)
   const [selectedNodeId, setSelectedNodeId] = useUrlQueryState("nodes-detail")
+  const [editingNodeId, setEditingNodeId] = useState<string | null>(null)
+  const [nodeDraft, setNodeDraft] = useState({
+    name: "",
+    hostname: "",
+    tags: "",
+  })
 
   const nodesQuery = useQuery({
     queryKey: [...queryScope, "nodes"],
@@ -443,6 +601,25 @@ export function NodesPage() {
     },
   })
 
+  const updateNodeMutation = useMutation({
+    mutationFn: async ({
+      node,
+      input,
+    }: {
+      node: Node
+      input: UpdateNodeInput
+    }) => adminApi.updateNode(settings, node.id, input),
+    onSuccess: async (updatedNode) => {
+      setFeedback({
+        tone: "success",
+        message: copy.nodes.editSuccess(updatedNode.name),
+      })
+      window.setTimeout(() => setFeedback(null), 2400)
+      setEditingNodeId(null)
+      await queryClient.invalidateQueries({ queryKey: [...queryScope, "nodes"] })
+    },
+  })
+
   const nodes = nodesQuery.data ?? []
 
   const selectedNodeDetail = selectedNodeId
@@ -451,6 +628,31 @@ export function NodesPage() {
   const selectedNodeIndex = selectedNodeDetail
     ? nodes.findIndex((node) => node.id === selectedNodeDetail.id)
     : -1
+  const isEditingNode =
+    selectedNodeDetail !== null && editingNodeId === String(selectedNodeDetail.id)
+
+  const beginNodeEdit = (node: Node) => {
+    setNodeDraft({
+      name: node.name,
+      hostname: node.hostname,
+      tags: node.tags.join(", "),
+    })
+    setEditingNodeId(String(node.id))
+  }
+
+  const stopNodeEdit = (node?: Node | null) => {
+    setEditingNodeId(null)
+    if (!node) {
+      setNodeDraft({ name: "", hostname: "", tags: "" })
+      return
+    }
+
+    setNodeDraft({
+      name: node.name,
+      hostname: node.hostname,
+      tags: node.tags.join(", "),
+    })
+  }
 
   const handleDisable = async (node: NonNullable<typeof nodesQuery.data>[number]) => {
     const confirmed = await confirmAction({
@@ -478,25 +680,59 @@ export function NodesPage() {
     bulkDisableMutation.mutate(selectedNodes)
   }
 
+  const handleSaveNode = async () => {
+    if (!selectedNodeDetail) {
+      return
+    }
+
+    const nextName = nodeDraft.name.trim()
+    const nextHostname = nodeDraft.hostname.trim()
+    const nextTags = splitTags(nodeDraft.tags)
+    const input: UpdateNodeInput = {}
+
+    if (nextName !== selectedNodeDetail.name) {
+      input.name = nextName
+    }
+
+    if (nextHostname !== selectedNodeDetail.hostname) {
+      input.hostname = nextHostname
+    }
+
+    if (nextTags.join(",") !== selectedNodeDetail.tags.join(",")) {
+      input.tags = nextTags
+    }
+
+    if (Object.keys(input).length === 0) {
+      stopNodeEdit(selectedNodeDetail)
+      return
+    }
+
+    try {
+      await updateNodeMutation.mutateAsync({
+        node: selectedNodeDetail,
+        input,
+      })
+    } catch {
+      // mutation state already drives the inline error surface
+    }
+  }
+
+  const canSaveNode =
+    nodeDraft.name.trim().length > 0 && nodeDraft.hostname.trim().length > 0
+
+  const selectNodeDetail = (nodeId: string) => {
+    setEditingNodeId(null)
+    setSelectedNodeId(nodeId)
+  }
+
   return (
-    <Panel
-      title={copy.nodes.panelTitle}
-      eyebrow={copy.nodes.panelEyebrow}
-      action={
-        <PanelRefreshAction
-          label={copy.refresh}
-          refreshingLabel={copy.refreshing}
-          refreshing={nodesQuery.isFetching}
-          onRefresh={() => void nodesQuery.refetch()}
-        />
-      }
-    >
+    <Panel>
       {nodesQuery.isPending && nodes.length === 0 ? (
         <PanelState mode="loading" message={copy.common.loading} />
       ) : nodesQuery.error && nodes.length === 0 ? (
         <PanelState
           mode="error"
-          message={getConsoleErrorMessage(nodesQuery.error, copy.common.loadFailed)}
+          message={getConsoleErrorMessage(nodesQuery.error, locale, copy.common.loadFailed)}
           actionLabel={copy.common.retry}
           onAction={() => void nodesQuery.refetch()}
         />
@@ -521,18 +757,23 @@ export function NodesPage() {
                   {copy.common.retry}
                 </Button>
               }
-            >
-              {getConsoleErrorMessage(nodesQuery.error, copy.common.loadFailed)}
+              >
+              {getConsoleErrorMessage(nodesQuery.error, locale, copy.common.loadFailed)}
             </InlineAlert>
           ) : null}
           {disableNodeMutation.error ? (
             <InlineAlert>
-              {getConsoleErrorMessage(disableNodeMutation.error, copy.common.loadFailed)}
+              {getConsoleErrorMessage(disableNodeMutation.error, locale, copy.common.loadFailed)}
             </InlineAlert>
           ) : null}
           {bulkDisableMutation.error ? (
             <InlineAlert>
-              {getConsoleErrorMessage(bulkDisableMutation.error, copy.common.loadFailed)}
+              {getConsoleErrorMessage(bulkDisableMutation.error, locale, copy.common.loadFailed)}
+            </InlineAlert>
+          ) : null}
+          {updateNodeMutation.error ? (
+            <InlineAlert>
+              {getConsoleErrorMessage(updateNodeMutation.error, locale, copy.common.loadFailed)}
             </InlineAlert>
           ) : null}
           <NodeTable
@@ -544,7 +785,7 @@ export function NodesPage() {
             }
             onDisable={handleDisable}
             onBulkDisable={handleBulkDisable}
-            onView={(node) => setSelectedNodeId(String(node.id))}
+            onView={(node) => selectNodeDetail(String(node.id))}
             activeNodeId={selectedNodeDetail?.id ?? null}
             bulkDisabled={bulkDisableMutation.isPending}
             resetSelectionKey={selectionVersion}
@@ -555,8 +796,8 @@ export function NodesPage() {
             subtitle={selectedNodeDetail?.name}
             canPrevious={selectedNodeIndex > 0}
             canNext={selectedNodeIndex >= 0 && selectedNodeIndex < nodes.length - 1}
-            onPrevious={() => setSelectedNodeId(String(nodes[selectedNodeIndex - 1]?.id ?? ""))}
-            onNext={() => setSelectedNodeId(String(nodes[selectedNodeIndex + 1]?.id ?? ""))}
+            onPrevious={() => selectNodeDetail(String(nodes[selectedNodeIndex - 1]?.id ?? ""))}
+            onNext={() => selectNodeDetail(String(nodes[selectedNodeIndex + 1]?.id ?? ""))}
             headerActions={
               selectedNodeDetail ? (
                 <>
@@ -564,7 +805,9 @@ export function NodesPage() {
                     variant="outline"
                     size="sm"
                     disabled={selectedNodeIndex <= 0}
-                    onClick={() => setSelectedNodeId(String(nodes[selectedNodeIndex - 1]?.id ?? ""))}
+                    onClick={() =>
+                      selectNodeDetail(String(nodes[selectedNodeIndex - 1]?.id ?? ""))
+                    }
                   >
                     <ChevronLeft className="size-4" />
                     {copy.common.previous}
@@ -573,7 +816,9 @@ export function NodesPage() {
                     variant="outline"
                     size="sm"
                     disabled={selectedNodeIndex < 0 || selectedNodeIndex >= nodes.length - 1}
-                    onClick={() => setSelectedNodeId(String(nodes[selectedNodeIndex + 1]?.id ?? ""))}
+                    onClick={() =>
+                      selectNodeDetail(String(nodes[selectedNodeIndex + 1]?.id ?? ""))
+                    }
                   >
                     {copy.common.next}
                     <ChevronRight className="size-4" />
@@ -581,38 +826,95 @@ export function NodesPage() {
                 </>
               ) : null
             }
-            onClose={() => setSelectedNodeId("")}
+            onClose={() => {
+              stopNodeEdit(null)
+              setSelectedNodeId("")
+            }}
           >
             {selectedNodeDetail ? (
               <div className="space-y-4">
-                <KeyValueGrid
-                  items={[
-                    { label: copy.common.hostname, value: selectedNodeDetail.hostname },
-                    { label: copy.common.stableId, value: selectedNodeDetail.stable_id },
-                    {
-                      label: copy.nodes.columns.status,
-                      value: copy.status.node[selectedNodeDetail.status],
-                    },
-                    {
-                      label: copy.nodes.columns.tags,
-                      value: joinTags(selectedNodeDetail.tags, copy.common.notSet),
-                    },
-                    { label: copy.common.ipv4, value: selectedNodeDetail.ipv4 ?? copy.common.noIpv4 },
-                    { label: copy.common.ipv6, value: selectedNodeDetail.ipv6 ?? copy.common.noIpv6 },
-                    {
-                      label: copy.common.lastSeen,
-                      value: formatDateTime(
-                        selectedNodeDetail.last_seen_unix_secs,
-                        locale,
-                        timezone
-                      ),
-                    },
-                    {
-                      label: copy.common.identifier,
-                      value: selectedNodeDetail.auth_key_id ?? copy.common.notSet,
-                    },
-                  ]}
-                />
+                {isEditingNode ? (
+                  <div className="space-y-4">
+                    <div className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                      {copy.nodes.editTitle}
+                    </div>
+                    <div className="grid gap-4">
+                      <div className="space-y-2">
+                        <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                          {copy.nodes.form.name}
+                        </label>
+                        <Input
+                          value={nodeDraft.name}
+                          onChange={(event) =>
+                            setNodeDraft((current) => ({
+                              ...current,
+                              name: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                          {copy.nodes.form.hostname}
+                        </label>
+                        <Input
+                          value={nodeDraft.hostname}
+                          onChange={(event) =>
+                            setNodeDraft((current) => ({
+                              ...current,
+                              hostname: event.target.value,
+                            }))
+                          }
+                        />
+                      </div>
+                      <div className="space-y-2">
+                        <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                          {copy.nodes.form.tags}
+                        </label>
+                        <Textarea
+                          value={nodeDraft.tags}
+                          onChange={(event) =>
+                            setNodeDraft((current) => ({
+                              ...current,
+                              tags: event.target.value,
+                            }))
+                          }
+                          placeholder={copy.nodes.form.tagsPlaceholder}
+                          className="min-h-[104px]"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <KeyValueGrid
+                    items={[
+                      { label: copy.common.hostname, value: selectedNodeDetail.hostname },
+                      { label: copy.common.stableId, value: selectedNodeDetail.stable_id },
+                      {
+                        label: copy.nodes.columns.status,
+                        value: copy.status.node[selectedNodeDetail.status],
+                      },
+                      {
+                        label: copy.nodes.columns.tags,
+                        value: joinTags(selectedNodeDetail.tags, copy.common.notSet),
+                      },
+                      { label: copy.common.ipv4, value: selectedNodeDetail.ipv4 ?? copy.common.noIpv4 },
+                      { label: copy.common.ipv6, value: selectedNodeDetail.ipv6 ?? copy.common.noIpv6 },
+                      {
+                        label: copy.common.lastSeen,
+                        value: formatDateTime(
+                          selectedNodeDetail.last_seen_unix_secs,
+                          locale,
+                          timezone
+                        ),
+                      },
+                      {
+                        label: copy.common.identifier,
+                        value: selectedNodeDetail.auth_key_id ?? copy.common.notSet,
+                      },
+                    ]}
+                  />
+                )}
                 <div className="flex justify-end gap-2">
                   <Button
                     variant="outline"
@@ -627,23 +929,56 @@ export function NodesPage() {
                     <Copy className="size-4" />
                     {copy.common.copyLink}
                   </Button>
-                  <Button variant="outline" onClick={() => setSelectedNodeId("")}>
-                    {copy.common.dismiss}
-                  </Button>
-                  <Button
-                    variant="destructive"
-                    disabled={
-                      selectedNodeDetail.status === "disabled" ||
-                      disableNodeMutation.isPending
-                    }
-                    onClick={() => void handleDisable(selectedNodeDetail)}
-                  >
-                    <Network className="size-4" />
-                    {disableNodeMutation.isPending &&
-                    disableNodeMutation.variables?.id === selectedNodeDetail.id
-                      ? copy.nodes.disabling
-                      : copy.nodes.disable}
-                  </Button>
+                  {isEditingNode ? (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={() => stopNodeEdit(selectedNodeDetail)}
+                      >
+                        {copy.common.cancel}
+                      </Button>
+                      <Button
+                        disabled={!canSaveNode || updateNodeMutation.isPending}
+                        onClick={() => void handleSaveNode()}
+                      >
+                        <Save className="size-4" />
+                        {updateNodeMutation.isPending ? copy.nodes.saving : copy.nodes.save}
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        variant="outline"
+                        onClick={() => {
+                          stopNodeEdit(null)
+                          setSelectedNodeId("")
+                        }}
+                      >
+                        {copy.common.dismiss}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        onClick={() => beginNodeEdit(selectedNodeDetail)}
+                      >
+                        <PencilLine className="size-4" />
+                        {copy.nodes.edit}
+                      </Button>
+                      <Button
+                        variant="destructive"
+                        disabled={
+                          selectedNodeDetail.status === "disabled" ||
+                          disableNodeMutation.isPending
+                        }
+                        onClick={() => void handleDisable(selectedNodeDetail)}
+                      >
+                        <Network className="size-4" />
+                        {disableNodeMutation.isPending &&
+                        disableNodeMutation.variables?.id === selectedNodeDetail.id
+                          ? copy.nodes.disabling
+                          : copy.nodes.disable}
+                      </Button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -666,18 +1001,23 @@ export function AccessPage() {
   } = useConsole()
   const copy = CONSOLE_COPY[locale]
   const queryClient = useQueryClient()
-  const [draft, setDraft] = useState({
-    description: "",
-    tags: "",
-    reusable: false,
-    ephemeral: false,
-  })
+  const [draft, setDraft] = useState<AuthKeyDraft>(DEFAULT_AUTH_KEY_DRAFT)
   const [lastIssuedKey, setLastIssuedKey] = useState<IssuedAuthKey | null>(null)
+  const [showIssuedSecret, setShowIssuedSecret] = useState(false)
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle")
   const [feedback, setFeedback] = useState<FeedbackState | null>(null)
   const [selectionVersion, setSelectionVersion] = useState(0)
   const [showOperations, setShowOperations] = useState(false)
   const [selectedAuthKeyId, setSelectedAuthKeyId] = useUrlQueryState("access-detail")
+  const draftTags = useMemo(() => splitTags(draft.tags), [draft.tags])
+  const draftErrors = useMemo(
+    () => validateAuthKeyDraft(draft, draftTags, copy.access.validation),
+    [copy.access.validation, draft, draftTags]
+  )
+  const resolvedDraftExpiryUnixSecs = useMemo(
+    () => resolveDraftExpiryUnixSecs(draft),
+    [draft]
+  )
 
   const authKeysQuery = useQuery({
     queryKey: [...queryScope, "auth-keys"],
@@ -720,27 +1060,48 @@ export function AccessPage() {
     mutationFn: (input: CreateAuthKeyInput) => adminApi.createAuthKey(settings, input),
     onSuccess: async (issuedAuthKey) => {
       setLastIssuedKey(issuedAuthKey)
+      setShowIssuedSecret(true)
       setFeedback({ tone: "success", message: copy.access.issueSuccess })
       pushToast({ tone: "success", message: copy.access.issueSuccess })
       window.setTimeout(() => setFeedback(null), 2400)
-      setDraft({
-        description: "",
-        tags: "",
-        reusable: false,
-        ephemeral: false,
-      })
+      setDraft(DEFAULT_AUTH_KEY_DRAFT)
       setCopyState("idle")
+      setShowOperations(true)
       await queryClient.invalidateQueries({ queryKey: [...queryScope, "auth-keys"] })
     },
   })
 
+  const canSubmitDraft =
+    connectionReady &&
+    !createAuthKeyMutation.isPending &&
+    Object.keys(draftErrors).length === 0
+
+  const updateDraft = (updater: (current: AuthKeyDraft) => AuthKeyDraft) => {
+    if (createAuthKeyMutation.error) {
+      createAuthKeyMutation.reset()
+    }
+    setDraft(updater)
+  }
+
+  const issueExpirySummary =
+    resolvedDraftExpiryUnixSecs != null
+      ? copy.access.secretExpiresAt(
+          formatDateTime(resolvedDraftExpiryUnixSecs, locale, timezone)
+        )
+      : copy.access.secretNeverExpires
+
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
+    if (Object.keys(draftErrors).length > 0) {
+      return
+    }
+
     await createAuthKeyMutation.mutateAsync({
       description: draft.description.trim() || undefined,
-      tags: splitTags(draft.tags),
+      tags: draftTags,
       reusable: draft.reusable,
       ephemeral: draft.ephemeral,
+      expires_at_unix_secs: resolvedDraftExpiryUnixSecs ?? undefined,
     })
   }
 
@@ -752,6 +1113,7 @@ export function AccessPage() {
     try {
       await navigator.clipboard.writeText(lastIssuedKey.key)
       setCopyState("copied")
+      pushToast({ tone: "success", message: copy.access.copySuccess })
       window.setTimeout(() => setCopyState("idle"), 1500)
     } catch {
       setCopyState("failed")
@@ -760,12 +1122,57 @@ export function AccessPage() {
   }
 
   const authKeys = authKeysQuery.data ?? []
+  const latestIssuedExpirySummary =
+    lastIssuedKey?.auth_key.expires_at_unix_secs != null
+      ? copy.access.secretExpiresAt(
+          formatDateTime(lastIssuedKey.auth_key.expires_at_unix_secs, locale, timezone)
+        )
+      : copy.access.secretNeverExpires
   const selectedAuthKeyDetail = selectedAuthKeyId
     ? authKeys.find((authKey) => authKey.id === selectedAuthKeyId) ?? null
     : null
   const selectedAuthKeyIndex = selectedAuthKeyDetail
     ? authKeys.findIndex((authKey) => authKey.id === selectedAuthKeyDetail.id)
     : -1
+
+  const applyAuthKeyTemplate = (authKey: AuthKey) => {
+    createAuthKeyMutation.reset()
+    const futureExpiry =
+      authKey.expires_at_unix_secs && authKey.expires_at_unix_secs > Math.floor(Date.now() / 1000)
+        ? authKey.expires_at_unix_secs
+        : null
+    setDraft({
+      description: authKey.description ?? "",
+      tags: authKey.tags.join(", "),
+      reusable: authKey.reusable,
+      ephemeral: authKey.ephemeral,
+      expiresPreset: futureExpiry ? "custom" : "30d",
+      customExpiresAt: futureExpiry ? toDateTimeLocalValue(futureExpiry) : "",
+    })
+    setLastIssuedKey(null)
+    setShowIssuedSecret(false)
+    setCopyState("idle")
+    setShowOperations(true)
+    setSelectedAuthKeyId("")
+  }
+
+  const acknowledgeIssuedSecret = () => {
+    createAuthKeyMutation.reset()
+    setLastIssuedKey(null)
+    setShowIssuedSecret(false)
+    setCopyState("idle")
+    setShowOperations(false)
+  }
+
+  const closeIssueSheet = () => {
+    if (lastIssuedKey) {
+      acknowledgeIssuedSecret()
+      return
+    }
+    createAuthKeyMutation.reset()
+    setDraft(DEFAULT_AUTH_KEY_DRAFT)
+    setShowOperations(false)
+  }
 
   const handleRevoke = async (authKey: NonNullable<typeof authKeysQuery.data>[number]) => {
     const label = authKey.description || authKey.id
@@ -795,181 +1202,14 @@ export function AccessPage() {
   }
 
   return (
-    <Panel
-      title={copy.access.authKeysTitle}
-      eyebrow={copy.access.authKeysEyebrow}
-      action={
-        <div className="flex flex-wrap items-center gap-2">
-          <Button
-            variant={showOperations ? "secondary" : "outline"}
-            size="sm"
-            onClick={() => setShowOperations((current) => !current)}
-          >
-            <KeyRound className="size-3.5" />
-            {showOperations ? copy.common.dismiss : copy.access.form.issue}
-          </Button>
-          <PanelRefreshAction
-            label={copy.refresh}
-            refreshingLabel={copy.refreshing}
-            refreshing={authKeysQuery.isFetching}
-            onRefresh={() => void authKeysQuery.refetch()}
-          />
-        </div>
-      }
-    >
+    <Panel>
       <div className="space-y-4">
-        {showOperations ? (
-          <div className="console-surface-soft space-y-4 rounded-[14px] p-4">
-            <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
-              <form className="space-y-4" onSubmit={onSubmit}>
-                <div className="space-y-2">
-                  <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
-                    {copy.access.form.description}
-                  </label>
-                  <Input
-                    value={draft.description}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        description: event.target.value,
-                      }))
-                    }
-                    placeholder={copy.access.form.descriptionPlaceholder}
-                  />
-                </div>
-
-                <div className="space-y-2">
-                  <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
-                    {copy.access.form.tags}
-                  </label>
-                  <Textarea
-                    value={draft.tags}
-                    onChange={(event) =>
-                      setDraft((current) => ({
-                        ...current,
-                        tags: event.target.value,
-                      }))
-                    }
-                    placeholder={copy.access.form.tagsPlaceholder}
-                    className="min-h-[104px]"
-                  />
-                </div>
-
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="console-surface-elevated flex items-center gap-3 rounded-[12px] px-3 py-3 text-[13px] text-secondary-foreground">
-                    <input
-                      type="checkbox"
-                      checked={draft.reusable}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          reusable: event.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-[var(--primary)]"
-                    />
-                    {copy.access.form.reusable}
-                  </label>
-                  <label className="console-surface-elevated flex items-center gap-3 rounded-[12px] px-3 py-3 text-[13px] text-secondary-foreground">
-                    <input
-                      type="checkbox"
-                      checked={draft.ephemeral}
-                      onChange={(event) =>
-                        setDraft((current) => ({
-                          ...current,
-                          ephemeral: event.target.checked,
-                        }))
-                      }
-                      className="size-4 accent-[var(--primary)]"
-                    />
-                    {copy.access.form.ephemeral}
-                  </label>
-                </div>
-
-                {createAuthKeyMutation.error ? (
-                  <div className="console-alert-error rounded-[12px] px-3 py-2 text-[13px]">
-                    {getConsoleErrorMessage(createAuthKeyMutation.error, copy.errorUnknown)}
-                  </div>
-                ) : null}
-
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="submit"
-                    disabled={!connectionReady || createAuthKeyMutation.isPending}
-                  >
-                    <KeyRound className="size-4" />
-                    {createAuthKeyMutation.isPending
-                      ? copy.access.form.issuing
-                      : copy.access.form.issue}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => {
-                      setDraft({
-                        description: "",
-                        tags: "",
-                        reusable: false,
-                        ephemeral: false,
-                      })
-                      setShowOperations(false)
-                    }}
-                  >
-                    <X className="size-3.5" />
-                    {copy.common.dismiss}
-                  </Button>
-                </div>
-              </form>
-
-              <div className="space-y-3">
-                <div className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
-                  {copy.access.latestTitle}
-                </div>
-                {lastIssuedKey ? (
-                  <div className="space-y-3">
-                    <div className="console-surface-elevated flex items-center gap-2 rounded-[12px] p-2">
-                      <Input
-                        readOnly
-                        value={lastIssuedKey.key}
-                        onFocus={(event) => event.currentTarget.select()}
-                        className="h-10 border-0 bg-transparent font-mono text-[12px] text-foreground shadow-none focus-visible:ring-0"
-                      />
-                      <Button size="sm" onClick={copyLastIssuedKey}>
-                        <Copy className="size-3.5" />
-                        {copyState === "copied" ? copy.common.copied : copy.common.copy}
-                      </Button>
-                    </div>
-                    {copyState === "failed" ? (
-                      <InlineAlert>{copy.access.copyFailed}</InlineAlert>
-                    ) : null}
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => {
-                        setLastIssuedKey(null)
-                        setCopyState("idle")
-                      }}
-                    >
-                      <X className="size-3.5" />
-                      {copy.common.clear}
-                    </Button>
-                  </div>
-                ) : (
-                  <div className="console-surface-dashed rounded-[12px] p-4 text-[12px] text-muted-foreground">
-                    {copy.access.latestEmpty}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        ) : null}
-
         {authKeysQuery.isPending && authKeys.length === 0 ? (
           <PanelState mode="loading" message={copy.access.loading} />
         ) : authKeysQuery.error && authKeys.length === 0 ? (
           <PanelState
             mode="error"
-            message={getConsoleErrorMessage(authKeysQuery.error, copy.common.loadFailed)}
+            message={getConsoleErrorMessage(authKeysQuery.error, locale, copy.common.loadFailed)}
             actionLabel={copy.common.retry}
             onAction={() => void authKeysQuery.refetch()}
           />
@@ -995,17 +1235,17 @@ export function AccessPage() {
                   </Button>
                 }
               >
-                {getConsoleErrorMessage(authKeysQuery.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(authKeysQuery.error, locale, copy.common.loadFailed)}
               </InlineAlert>
             ) : null}
             {revokeAuthKeyMutation.error ? (
               <InlineAlert>
-                {getConsoleErrorMessage(revokeAuthKeyMutation.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(revokeAuthKeyMutation.error, locale, copy.common.loadFailed)}
               </InlineAlert>
             ) : null}
             {bulkRevokeMutation.error ? (
               <InlineAlert>
-                {getConsoleErrorMessage(bulkRevokeMutation.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(bulkRevokeMutation.error, locale, copy.common.loadFailed)}
               </InlineAlert>
             ) : null}
             <AuthKeyTable
@@ -1021,7 +1261,271 @@ export function AccessPage() {
               activeKeyId={selectedAuthKeyDetail?.id ?? null}
               bulkRevoking={bulkRevokeMutation.isPending}
               resetSelectionKey={selectionVersion}
+              toolbarAction={
+                <Button
+                  variant={showOperations ? "secondary" : "outline"}
+                  size="sm"
+                  onClick={() => {
+                    if (lastIssuedKey) {
+                      acknowledgeIssuedSecret()
+                      return
+                    }
+                    setShowOperations((current) => !current)
+                  }}
+                >
+                  {lastIssuedKey ? (
+                    <CheckCircle2 className="size-3.5" />
+                  ) : (
+                    <KeyRound className="size-3.5" />
+                  )}
+                  {lastIssuedKey
+                    ? copy.access.secretStored
+                    : showOperations
+                      ? copy.common.dismiss
+                      : copy.access.form.issue}
+                </Button>
+              }
             />
+            <DetailSheet
+              open={showOperations}
+              title={copy.access.issueTitle}
+              subtitle={lastIssuedKey ? copy.access.latestTitle : copy.access.issueHelper}
+              onClose={closeIssueSheet}
+            >
+              <div className="space-y-5">
+                <form className="space-y-4" onSubmit={onSubmit}>
+                  <div className="space-y-2">
+                    <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                      {copy.access.form.description}
+                    </label>
+                    <Input
+                      value={draft.description}
+                      onChange={(event) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          description: event.target.value,
+                        }))
+                      }
+                      placeholder={copy.access.form.descriptionPlaceholder}
+                      aria-invalid={Boolean(draftErrors.description)}
+                    />
+                    {draftErrors.description ? (
+                      <p className="text-[12px] text-destructive-foreground">
+                        {draftErrors.description}
+                      </p>
+                    ) : null}
+                  </div>
+
+                  <div className="space-y-2">
+                    <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                      {copy.access.form.tags}
+                    </label>
+                    <Textarea
+                      value={draft.tags}
+                      onChange={(event) =>
+                        updateDraft((current) => ({
+                          ...current,
+                          tags: event.target.value,
+                        }))
+                      }
+                      placeholder={copy.access.form.tagsPlaceholder}
+                      className="min-h-[104px]"
+                      aria-invalid={Boolean(draftErrors.tags)}
+                    />
+                    {draftErrors.tags ? (
+                      <p className="text-[12px] text-destructive-foreground">{draftErrors.tags}</p>
+                    ) : null}
+                  </div>
+
+                  <div className="space-y-3">
+                    <div className="space-y-2">
+                      <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                        {copy.access.form.expires}
+                      </label>
+                      <div className="flex flex-wrap gap-2">
+                        {AUTH_KEY_EXPIRY_PRESETS.map((preset) => {
+                          const label =
+                            preset.value === "24h"
+                              ? copy.access.form.expiresPreset24h
+                              : preset.value === "7d"
+                                ? copy.access.form.expiresPreset7d
+                                : preset.value === "30d"
+                                  ? copy.access.form.expiresPreset30d
+                                  : preset.value === "custom"
+                                    ? copy.access.form.expiresPresetCustom
+                                    : copy.access.form.expiresNever
+
+                          return (
+                            <Button
+                              key={preset.value}
+                              type="button"
+                              size="sm"
+                              variant={
+                                draft.expiresPreset === preset.value ? "secondary" : "outline"
+                              }
+                              onClick={() =>
+                                updateDraft((current) => ({
+                                  ...current,
+                                  expiresPreset: preset.value,
+                                  customExpiresAt:
+                                    preset.value === "custom" ? current.customExpiresAt : "",
+                                }))
+                              }
+                            >
+                              {label}
+                            </Button>
+                          )
+                        })}
+                      </div>
+                    </div>
+                    {draft.expiresPreset === "custom" ? (
+                      <div className="space-y-2">
+                        <label className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                          {copy.access.form.expiresCustomLabel}
+                        </label>
+                        <Input
+                          type="datetime-local"
+                          value={draft.customExpiresAt}
+                          onChange={(event) =>
+                            updateDraft((current) => ({
+                              ...current,
+                              customExpiresAt: event.target.value,
+                            }))
+                          }
+                          placeholder={copy.access.form.expiresCustomPlaceholder}
+                          aria-invalid={Boolean(draftErrors.expiresAt)}
+                        />
+                        {draftErrors.expiresAt ? (
+                          <p className="text-[12px] text-destructive-foreground">
+                            {draftErrors.expiresAt}
+                          </p>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    <div className="console-surface-elevated space-y-2 rounded-[12px] p-3">
+                      <p className="text-[12px] text-secondary-foreground">
+                        {copy.access.form.expiresHelp}
+                      </p>
+                      <div className="text-[12px] font-[510] text-foreground">
+                        {issueExpirySummary}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="console-surface-elevated flex items-center gap-3 rounded-[12px] px-3 py-3 text-[13px] text-secondary-foreground">
+                      <input
+                        type="checkbox"
+                        checked={draft.reusable}
+                        onChange={(event) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            reusable: event.target.checked,
+                          }))
+                        }
+                        className="size-4 accent-[var(--primary)]"
+                      />
+                      {copy.access.form.reusable}
+                    </label>
+                    <label className="console-surface-elevated flex items-center gap-3 rounded-[12px] px-3 py-3 text-[13px] text-secondary-foreground">
+                      <input
+                        type="checkbox"
+                        checked={draft.ephemeral}
+                        onChange={(event) =>
+                          updateDraft((current) => ({
+                            ...current,
+                            ephemeral: event.target.checked,
+                          }))
+                        }
+                        className="size-4 accent-[var(--primary)]"
+                      />
+                      {copy.access.form.ephemeral}
+                    </label>
+                  </div>
+
+                  {createAuthKeyMutation.error ? (
+                    <div className="console-alert-error rounded-[12px] px-3 py-2 text-[13px]">
+                      {getConsoleErrorMessage(
+                        createAuthKeyMutation.error,
+                        locale,
+                        copy.errorUnknown
+                      )}
+                    </div>
+                  ) : null}
+
+                  {!lastIssuedKey ? <InlineAlert tone="info">{copy.access.issueHelper}</InlineAlert> : null}
+
+                  <div className="flex flex-wrap gap-2">
+                    <Button type="submit" disabled={!canSubmitDraft}>
+                      <KeyRound className="size-4" />
+                      {createAuthKeyMutation.isPending
+                        ? copy.access.form.issuing
+                        : copy.access.form.issue}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      disabled={createAuthKeyMutation.isPending}
+                      onClick={closeIssueSheet}
+                    >
+                      <X className="size-3.5" />
+                      {copy.common.dismiss}
+                    </Button>
+                  </div>
+                </form>
+
+                {lastIssuedKey ? (
+                  <div className="space-y-3 border-t border-border pt-5">
+                    <InlineAlert tone="info">{copy.access.secretShownOnce}</InlineAlert>
+                    <div className="console-surface-elevated space-y-3 rounded-[12px] p-3">
+                      <div className="console-eyebrow text-[12px] font-[510] tracking-[0.14em] uppercase">
+                        {copy.access.latestTitle}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Input
+                          readOnly
+                          type={showIssuedSecret ? "text" : "password"}
+                          value={lastIssuedKey.key}
+                          onFocus={(event) => event.currentTarget.select()}
+                          className="h-10 border-0 bg-transparent font-mono text-[12px] text-foreground shadow-none focus-visible:ring-0"
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setShowIssuedSecret((current) => !current)}
+                        >
+                          {showIssuedSecret ? (
+                            <EyeOff className="size-3.5" />
+                          ) : (
+                            <Eye className="size-3.5" />
+                          )}
+                          {showIssuedSecret ? copy.access.secretHide : copy.access.secretReveal}
+                        </Button>
+                        <Button type="button" size="sm" onClick={() => void copyLastIssuedKey()}>
+                          <Copy className="size-3.5" />
+                          {copyState === "copied" ? copy.common.copied : copy.common.copy}
+                        </Button>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-[12px] text-secondary-foreground">
+                        <span>{latestIssuedExpirySummary}</span>
+                        <Badge variant="secondary">
+                          {lastIssuedKey.auth_key.description ??
+                            copy.access.table.descriptionFallback}
+                        </Badge>
+                      </div>
+                    </div>
+                    {copyState === "failed" ? (
+                      <InlineAlert>{copy.access.copyFailed}</InlineAlert>
+                    ) : null}
+                    <Button type="button" onClick={acknowledgeIssuedSecret}>
+                      <CheckCircle2 className="size-4" />
+                      {copy.access.secretStored}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </DetailSheet>
             <DetailSheet
               open={Boolean(selectedAuthKeyDetail)}
               title={copy.access.detailsTitle}
@@ -1130,6 +1634,13 @@ export function AccessPage() {
                     </Button>
                     <Button variant="outline" onClick={() => setSelectedAuthKeyId("")}>
                       {copy.common.dismiss}
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => applyAuthKeyTemplate(selectedAuthKeyDetail)}
+                    >
+                      <PencilLine className="size-4" />
+                      {copy.access.useAsTemplate}
                     </Button>
                     <Button
                       variant="destructive"
@@ -1307,27 +1818,13 @@ export function NetworkPage() {
 
   return (
     <div className="grid gap-6 xl:grid-cols-[1.08fr_0.92fr]">
-      <Panel
-        title={copy.network.routesTitle}
-        eyebrow={copy.network.routesEyebrow}
-        action={
-          <PanelRefreshAction
-            label={copy.refresh}
-            refreshingLabel={copy.refreshing}
-            refreshing={routesQuery.isFetching || nodesQuery.isFetching}
-            onRefresh={() => {
-              void routesQuery.refetch()
-              void nodesQuery.refetch()
-            }}
-          />
-        }
-      >
+      <Panel>
         {routesQuery.isPending && routes.length === 0 ? (
           <PanelState mode="loading" message={copy.common.loading} />
         ) : routesQuery.error && routes.length === 0 ? (
           <PanelState
             mode="error"
-            message={getConsoleErrorMessage(routesQuery.error, copy.common.loadFailed)}
+            message={getConsoleErrorMessage(routesQuery.error, locale, copy.common.loadFailed)}
             actionLabel={copy.common.retry}
             onAction={() => void routesQuery.refetch()}
           />
@@ -1353,17 +1850,21 @@ export function NetworkPage() {
                   </Button>
                 }
               >
-                {getConsoleErrorMessage(routesQuery.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(routesQuery.error, locale, copy.common.loadFailed)}
               </InlineAlert>
             ) : null}
             {routeDecisionMutation.error ? (
               <InlineAlert>
-                {getConsoleErrorMessage(routeDecisionMutation.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(routeDecisionMutation.error, locale, copy.common.loadFailed)}
               </InlineAlert>
             ) : null}
             {bulkRouteDecisionMutation.error ? (
               <InlineAlert>
-                {getConsoleErrorMessage(bulkRouteDecisionMutation.error, copy.common.loadFailed)}
+                {getConsoleErrorMessage(
+                  bulkRouteDecisionMutation.error,
+                  locale,
+                  copy.common.loadFailed
+                )}
               </InlineAlert>
             ) : null}
             <RouteTable
@@ -1539,7 +2040,7 @@ export function NetworkPage() {
           ) : derpQuery.error && !derp ? (
             <PanelState
               mode="error"
-              message={getConsoleErrorMessage(derpQuery.error, copy.common.loadFailed)}
+              message={getConsoleErrorMessage(derpQuery.error, locale, copy.common.loadFailed)}
               actionLabel={copy.common.retry}
               onAction={() => void derpQuery.refetch()}
             />
@@ -1646,24 +2147,13 @@ export function AuditPage() {
   }
 
   return (
-    <Panel
-      title={copy.audit.title}
-      eyebrow={copy.audit.eyebrow}
-      action={
-        <PanelRefreshAction
-          label={copy.refresh}
-          refreshingLabel={copy.refreshing}
-          refreshing={auditQuery.isFetching}
-          onRefresh={() => void auditQuery.refetch()}
-        />
-      }
-    >
+    <Panel>
       {auditQuery.isPending && auditEvents.length === 0 ? (
         <PanelState mode="loading" message={copy.audit.loading} />
       ) : auditQuery.error && auditEvents.length === 0 ? (
         <PanelState
           mode="error"
-          message={getConsoleErrorMessage(auditQuery.error, copy.common.loadFailed)}
+          message={getConsoleErrorMessage(auditQuery.error, locale, copy.common.loadFailed)}
           actionLabel={copy.common.retry}
           onAction={() => void auditQuery.refetch()}
         />
@@ -1724,7 +2214,7 @@ export function AuditPage() {
                 </Button>
               }
             >
-              {getConsoleErrorMessage(auditQuery.error, copy.common.loadFailed)}
+              {getConsoleErrorMessage(auditQuery.error, locale, copy.common.loadFailed)}
             </InlineAlert>
           ) : null}
           {filteredAuditEvents.length === 0 ? (

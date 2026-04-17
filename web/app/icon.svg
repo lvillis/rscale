@@ -1,22 +1,39 @@
 <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="8" y="8" width="48" height="48" rx="15" fill="#0B0D12"/>
-  <rect x="8.5" y="8.5" width="47" height="47" rx="14.5" stroke="#FFFFFF" stroke-opacity="0.12"/>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #0f172a;
+      --border: rgba(255, 255, 255, 0.08);
+      --stroke: #e6edf3;
+      --accent: #8ea2ff;
+      --soft: #1e2a44;
+      --core: #f0f6fc;
+      --core-dot: rgba(13, 17, 23, 0.96);
+    }
 
-  <path
-    d="M22 18V46"
-    stroke="#8EA0FF"
-    stroke-width="4.5"
-    stroke-linecap="round"
-    stroke-opacity="0.22"
-  />
-  <path
-    d="M26 20H33C39.18 20 43 24.418 43 32C43 39.582 39.18 44 33 44H26"
-    stroke="#F5F7FF"
-    stroke-width="5.5"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  />
-  <circle cx="22" cy="18" r="3.5" fill="#8EA0FF"/>
-  <circle cx="22" cy="46" r="3.5" fill="#8EA0FF"/>
-  <circle cx="43" cy="32" r="3.5" fill="#F5F7FF"/>
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg: #eef2ff;
+        --border: rgba(15, 23, 42, 0.08);
+        --stroke: #1f2937;
+        --accent: #5568f5;
+        --soft: #ffffff;
+        --core: #111827;
+        --core-dot: rgba(255, 255, 255, 0.94);
+      }
+    }
+  </style>
+
+  <rect x="8" y="8" width="48" height="48" rx="16" fill="var(--bg)"/>
+  <rect x="8.5" y="8.5" width="47" height="47" rx="15.5" stroke="var(--border)"/>
+  <rect x="15" y="15" width="34" height="34" rx="12" fill="var(--soft)"/>
+
+  <path d="M23 21L29.5 27.5" stroke="var(--stroke)" stroke-width="3.4" stroke-linecap="round"/>
+  <path d="M23 43L29.5 36.5" stroke="var(--stroke)" stroke-width="3.4" stroke-linecap="round"/>
+  <path d="M37.5 32H43.5" stroke="var(--accent)" stroke-width="3.4" stroke-linecap="round"/>
+  <circle cx="21" cy="19" r="3.8" fill="var(--core)"/>
+  <circle cx="21" cy="45" r="3.8" fill="var(--core)"/>
+  <circle cx="32" cy="32" r="5.4" fill="var(--accent)"/>
+  <circle cx="45" cy="32" r="4.8" fill="var(--accent)"/>
+  <circle cx="32" cy="32" r="2" fill="var(--core-dot)"/>
 </svg>

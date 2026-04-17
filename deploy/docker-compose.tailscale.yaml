@@ -4,6 +4,7 @@ services:
     image: tailscale/tailscale:stable
     restart: unless-stopped
     hostname: ${TS_HOSTNAME:-rscale-sidecar}
+    network_mode: host
     environment:
       - TS_AUTHKEY=${TS_AUTHKEY:?set TS_AUTHKEY to a valid auth key}
       - TS_HOSTNAME=${TS_HOSTNAME:-rscale-sidecar}
@@ -11,8 +12,8 @@ services:
       - TS_USERSPACE=false
       - TS_ACCEPT_DNS=false
       - TS_EXTRA_ARGS=--login-server=${TS_LOGIN_SERVER:-https://rscale.example.com}
-    volumes:
-      - ./tailscale:/var/lib/tailscale
+    # volumes:
+      # - ./tailscale:/var/lib/tailscale
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -33,10 +34,22 @@ services:
       tailscale:
         condition: service_healthy
     network_mode: "service:tailscale"
+    environment:
+      - APP_PORT=${TS_APP_PORT:-18080}
     command:
       - /bin/sh
       - -ec
       - |
+          : "$${APP_PORT:=18080}"
+          cat >/etc/nginx/conf.d/default.conf <<EOF
+          server {
+            listen $${APP_PORT};
+            listen [::]:$${APP_PORT};
+            server_name _;
+            root /usr/share/nginx/html;
+            index index.html;
+          }
+          EOF
           cat >/usr/share/nginx/html/index.html <<'EOF'
           <!doctype html>
           <html lang="en">
@@ -70,14 +83,14 @@ services:
             <body>
               <main>
                 <h1>rscale Tailscale sidecar</h1>
-                <p>This container is reachable through the tailnet via the sidecar node.</p>
+                <p>This container is reachable through the tailnet via the sidecar node on port 18080.</p>
               </main>
             </body>
           </html>
           EOF
           exec nginx -g 'daemon off;'
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1/ >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:${TS_APP_PORT:-18080}/ >/dev/null 2>&1 || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 3

@@ -8,6 +8,7 @@ import type {
   IssuedAuthKey,
   Node,
   Route,
+  UpdateNodeInput,
 } from "@/lib/types"
 
 export const CONSOLE_AUTH_EXPIRED_EVENT = "rscale:auth-expired"
@@ -139,6 +140,18 @@ export const adminApi = {
   disableNode: (settings: ConsoleConnectionSettings, id: number) =>
     requestJson<Node>(`/nodes/${id}/disable`, settings, {
       method: "POST",
+    }),
+  updateNode: (
+    settings: ConsoleConnectionSettings,
+    id: number,
+    input: UpdateNodeInput
+  ) =>
+    requestJson<Node>(`/nodes/${id}`, settings, {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
     }),
   getAuthKeys: (settings: ConsoleConnectionSettings) =>
     requestJson<AuthKey[]>("/auth-keys", settings),

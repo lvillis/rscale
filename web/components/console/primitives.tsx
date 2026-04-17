@@ -161,28 +161,38 @@ export function Panel({
   eyebrow,
   action,
   children,
+  className,
+  contentClassName,
 }: {
-  title: string
+  title?: string
   eyebrow?: string
   action?: ReactNode
   children: ReactNode
+  className?: string
+  contentClassName?: string
 }) {
+  const hasHeader = Boolean(title || eyebrow || action)
+
   return (
-    <Card className="shadow-none">
-      <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0 border-b border-border pb-4">
-        <div className="space-y-1">
-          {eyebrow ? (
-            <div className="console-eyebrow text-[11px] font-[510] tracking-[0.18em] uppercase">
-              {eyebrow}
-            </div>
-          ) : null}
-          <CardTitle className="text-[16px] font-[510] tracking-[-0.22px] text-foreground">
-            {title}
-          </CardTitle>
-        </div>
-        {action}
-      </CardHeader>
-      <CardContent className="p-5">{children}</CardContent>
+    <Card className={`shadow-none ${className ?? ""}`}>
+      {hasHeader ? (
+        <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0 border-b border-border pb-4">
+          <div className="space-y-1">
+            {eyebrow ? (
+              <div className="console-eyebrow text-[11px] font-[510] tracking-[0.18em] uppercase">
+                {eyebrow}
+              </div>
+            ) : null}
+            {title ? (
+              <CardTitle className="text-[16px] font-[510] tracking-[-0.22px] text-foreground">
+                {title}
+              </CardTitle>
+            ) : null}
+          </div>
+          {action}
+        </CardHeader>
+      ) : null}
+      <CardContent className={`p-5 ${contentClassName ?? ""}`}>{children}</CardContent>
     </Card>
   )
 }

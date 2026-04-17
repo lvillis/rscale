@@ -9,6 +9,7 @@ export type AdminHealthResponse = {
   oidc_enabled: boolean
   config_has_warnings: boolean
   log_format: string
+  log_timezone: string
 }
 
 export type ConfigSummary = {
@@ -37,6 +38,7 @@ export type ConfigSummary = {
   control_pop_browser_url_configured: boolean
   log_filter: string
   log_format: string
+  log_timezone: string
 }
 
 export type AdminConfigResponse = {
@@ -182,6 +184,13 @@ export type CreateAuthKeyInput = {
   tags: string[]
   reusable: boolean
   ephemeral: boolean
+  expires_at_unix_secs?: number
+}
+
+export type UpdateNodeInput = {
+  name?: string
+  hostname?: string
+  tags?: string[]
 }
 
 export type ApiErrorPayload = {

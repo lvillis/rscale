@@ -293,6 +293,15 @@ samp {
   border: 1px solid color-mix(in srgb, var(--foreground) 8%, transparent);
 }
 
+.console-surface-elevated {
+  background: color-mix(in srgb, var(--surface-elevated) 96%, var(--background) 4%);
+  border: 1px solid color-mix(in srgb, var(--foreground) 9%, transparent);
+  backdrop-filter: blur(22px);
+  box-shadow:
+    0 22px 44px color-mix(in srgb, black 28%, transparent),
+    inset 0 1px 0 color-mix(in srgb, white 6%, transparent);
+}
+
 .console-surface-soft {
   background: var(--surface-soft);
   border: 1px solid color-mix(in srgb, var(--foreground) 7%, transparent);

@@ -16,7 +16,9 @@ RUN --mount=type=cache,target=/pnpm/store \
     pnpm build
 
 
-FROM rust:1.94-trixie AS rust-builder
+ARG RUST_VERSION=1.95.0
+
+FROM rust:${RUST_VERSION}-trixie AS rust-builder
 
 WORKDIR /work
 

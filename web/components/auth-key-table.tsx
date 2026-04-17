@@ -14,6 +14,7 @@ import {
 } from "@tanstack/react-table"
 import { ArrowUpDown, Ban, Columns3 } from "lucide-react"
 import {
+  type ReactNode,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -116,6 +117,7 @@ export function AuthKeyTable({
   activeKeyId,
   bulkRevoking,
   resetSelectionKey,
+  toolbarAction,
 }: {
   authKeys: AuthKey[]
   pendingKeyId: string | null
@@ -125,6 +127,7 @@ export function AuthKeyTable({
   activeKeyId: string | null
   bulkRevoking: boolean
   resetSelectionKey: number
+  toolbarAction?: ReactNode
 }) {
   const { locale, timezone } = useConsole()
   const accessCopy = CONSOLE_COPY[locale].access
@@ -435,95 +438,87 @@ export function AuthKeyTable({
 
   return (
     <div className="space-y-4">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <p className="text-[15px] font-[510] tracking-[-0.165px] text-foreground">
-            {copy.title}
-          </p>
-          <p className="text-[13px] tracking-[-0.13px] text-muted-foreground">
-            {copy.count(filteredAuthKeys.length, authKeys.length)}
-          </p>
-        </div>
-        <SearchField
-          value={query}
-          onChange={setQuery}
-          onClear={clearQuery}
-          placeholder={copy.filterPlaceholder}
-          clearLabel={common.clearFilters}
-          focusLabel={common.focusSearch}
-          className="w-full sm:w-72"
-        />
-        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
-          <div className="relative" ref={columnsMenuRef}>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => setShowColumns((current) => !current)}
-            >
-              <Columns3 className="size-3.5" />
-              {common.columns}
-            </Button>
-            {showColumns ? (
-              <div className="console-surface-elevated absolute top-full right-0 z-20 mt-2 min-w-[220px] rounded-[12px] border border-border p-3 shadow-[0_18px_40px_rgba(0,0,0,0.18)]">
-                <div className="mb-2 text-[11px] font-[510] tracking-[0.16em] text-muted-foreground uppercase">
-                  {common.columns}
+      <div className="space-y-3 border-b border-border/70 pb-4">
+        <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+          <SearchField
+            value={query}
+            onChange={setQuery}
+            onClear={clearQuery}
+            placeholder={copy.filterPlaceholder}
+            clearLabel={common.clearFilters}
+            focusLabel={common.focusSearch}
+            className="w-full xl:max-w-[420px]"
+          />
+          <div className="flex flex-wrap items-center gap-2 xl:justify-end">
+            {toolbarAction}
+            <div className="relative" ref={columnsMenuRef}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setShowColumns((current) => !current)}
+              >
+                <Columns3 className="size-3.5" />
+                {common.columns}
+              </Button>
+              {showColumns ? (
+                <div className="console-surface-elevated absolute top-full right-0 z-20 mt-2 min-w-[220px] rounded-[12px] border border-border p-3 shadow-[0_18px_40px_rgba(0,0,0,0.18)]">
+                  <div className="mb-2 text-[11px] font-[510] tracking-[0.16em] text-muted-foreground uppercase">
+                    {common.columns}
+                  </div>
+                  <div className="space-y-2">
+                    {toggleableColumns.map((column) => (
+                      <label
+                        key={column.id}
+                        className="flex items-center gap-2 text-[13px] text-foreground"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={column.getIsVisible()}
+                          onChange={column.getToggleVisibilityHandler()}
+                          className="size-4 accent-[var(--primary)]"
+                        />
+                        {column.id === "description"
+                          ? copy.columns.key
+                          : column.id === "state"
+                            ? copy.columns.status
+                            : column.id === "tags"
+                              ? copy.columns.tags
+                              : column.id === "shape"
+                                ? copy.columns.policy
+                                : column.id === "usage_count"
+                                  ? copy.columns.usage
+                                  : copy.columns.lifecycle}
+                      </label>
+                    ))}
+                  </div>
                 </div>
-                <div className="space-y-2">
-                  {toggleableColumns.map((column) => (
-                    <label
-                      key={column.id}
-                      className="flex items-center gap-2 text-[13px] text-foreground"
-                    >
-                      <input
-                        type="checkbox"
-                        checked={column.getIsVisible()}
-                        onChange={column.getToggleVisibilityHandler()}
-                        className="size-4 accent-[var(--primary)]"
-                      />
-                      {column.id === "description"
-                        ? copy.columns.key
-                        : column.id === "state"
-                          ? copy.columns.status
-                          : column.id === "tags"
-                            ? copy.columns.tags
-                            : column.id === "shape"
-                              ? copy.columns.policy
-                              : column.id === "usage_count"
-                                ? copy.columns.usage
-                                : copy.columns.lifecycle}
-                    </label>
-                  ))}
-                </div>
-              </div>
+              ) : null}
+            </div>
+            <div className="inline-flex items-center gap-1 rounded-full border border-border/80 bg-background px-1 py-1">
+              <Button
+                variant={resolvedDensity === "comfortable" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setDensity("comfortable")}
+              >
+                {common.comfortable}
+              </Button>
+              <Button
+                variant={resolvedDensity === "compact" ? "secondary" : "ghost"}
+                size="sm"
+                onClick={() => setDensity("compact")}
+              >
+                {common.compact}
+              </Button>
+            </div>
+            {hasActiveFilters ? (
+              <Button variant="ghost" size="sm" onClick={clearFilters}>
+                {common.clearFilters}
+              </Button>
             ) : null}
           </div>
-          <div className="console-surface-soft flex items-center gap-1 rounded-[10px] px-1 py-1">
-            <span className="px-2 text-[11px] font-[510] tracking-[0.14em] text-muted-foreground uppercase">
-              {common.density}
-            </span>
-            <Button
-              variant={resolvedDensity === "comfortable" ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setDensity("comfortable")}
-            >
-              {common.comfortable}
-            </Button>
-            <Button
-              variant={resolvedDensity === "compact" ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setDensity("compact")}
-            >
-              {common.compact}
-            </Button>
-          </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={clearFilters}
-            disabled={!hasActiveFilters}
-          >
-            {common.clearFilters}
-          </Button>
+        </div>
+        <div className="text-[12px] tracking-[-0.12px] text-muted-foreground">
+          {copy.count(filteredAuthKeys.length, authKeys.length)}
         </div>
       </div>
 

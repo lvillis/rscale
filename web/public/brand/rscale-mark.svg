@@ -1,19 +1,39 @@
 <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <path
-    d="M20 18V46"
-    stroke="#6376F6"
-    stroke-width="4.5"
-    stroke-linecap="round"
-    stroke-opacity="0.18"
-  />
-  <path
-    d="M24 20H32C39.18 20 44 24.418 44 32C44 39.582 39.18 44 32 44H24"
-    stroke="#6376F6"
-    stroke-width="5.5"
-    stroke-linecap="round"
-    stroke-linejoin="round"
-  />
-  <circle cx="20" cy="18" r="4" fill="#6376F6"/>
-  <circle cx="20" cy="46" r="4" fill="#6376F6"/>
-  <circle cx="44" cy="32" r="4" fill="#6376F6"/>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --stroke: #1f2937;
+      --accent: #5b6df7;
+      --soft: #dfe5ff;
+      --core: #0f172a;
+      --core-dot: rgba(255, 255, 255, 0.94);
+    }
+
+    .stroke { stroke: var(--stroke); }
+    .accent { fill: var(--accent); }
+    .accent-stroke { stroke: var(--accent); }
+    .soft { fill: var(--soft); }
+    .core { fill: var(--core); }
+    .core-dot { fill: var(--core-dot); }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --stroke: #e6edf3;
+        --accent: #8ea2ff;
+        --soft: #24314f;
+        --core: #f0f6fc;
+        --core-dot: rgba(13, 17, 23, 0.96);
+      }
+    }
+  </style>
+
+  <rect x="8" y="8" width="48" height="48" rx="16" class="soft"/>
+  <path d="M20 18L29.5 27.5" class="stroke" stroke-width="3.6" stroke-linecap="round"/>
+  <path d="M20 46L29.5 36.5" class="stroke" stroke-width="3.6" stroke-linecap="round"/>
+  <path d="M38 32H47" class="accent-stroke" stroke-width="3.6" stroke-linecap="round"/>
+  <circle cx="17.5" cy="15.5" r="4.5" class="core"/>
+  <circle cx="17.5" cy="48.5" r="4.5" class="core"/>
+  <circle cx="33" cy="32" r="6.5" class="accent"/>
+  <circle cx="50" cy="32" r="5.5" class="accent"/>
+  <circle cx="33" cy="32" r="2.4" class="core-dot"/>
 </svg>

@@ -26,7 +26,14 @@ import {
   loadConnectionSettings,
   saveConnectionSettings,
 } from "@/lib/connection"
-import { CONSOLE_COPY, type ConsoleLocale } from "./strings"
+import {
+  DEFAULT_CONSOLE_LOCALE,
+  resolveConsoleHtmlLang,
+  resolveInitialConsoleLocale,
+  resolveConsoleLocale,
+  type ConsoleLocale,
+} from "@/lib/console-i18n"
+import { CONSOLE_COPY } from "./strings"
 
 type ConsoleTheme = "dark" | "light"
 export type ConsoleTimeZone = "local" | "utc"
@@ -51,8 +58,10 @@ type ConsoleContextValue = {
   locale: ConsoleLocale
   timezone: ConsoleTimeZone
   toggleTheme: () => void
-  toggleLocale: () => void
+  setTheme: (theme: ConsoleTheme) => void
+  setLocale: (locale: ConsoleLocale) => void
   toggleTimezone: () => void
+  setTimezone: (timezone: ConsoleTimeZone) => void
   settings: ConsoleConnectionSettings
   draftSettings: ConsoleConnectionSettings
   setDraftSettings: Dispatch<SetStateAction<ConsoleConnectionSettings>>
@@ -101,14 +110,6 @@ function resolveNextPath(nextPath: string) {
   return nextPath
 }
 
-function resolveErrorLocale(): ConsoleLocale {
-  if (typeof document === "undefined") {
-    return "zh"
-  }
-
-  return document.documentElement.lang.startsWith("en") ? "en" : "zh"
-}
-
 function translateConsoleError(error: ConsoleApiError, locale: ConsoleLocale) {
   const copy = CONSOLE_COPY[locale]
 
@@ -128,9 +129,13 @@ function translateConsoleError(error: ConsoleApiError, locale: ConsoleLocale) {
   }
 }
 
-export function getConsoleErrorMessage(error: unknown, fallback = "Unknown error") {
+export function getConsoleErrorMessage(
+  error: unknown,
+  locale: ConsoleLocale,
+  fallback = "Unknown error"
+) {
   if (error instanceof ConsoleApiError) {
-    const translated = translateConsoleError(error, resolveErrorLocale())
+    const translated = translateConsoleError(error, locale)
     if (translated) {
       return translated
     }
@@ -148,7 +153,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
   const queryClient = useQueryClient()
   const [hydrated, setHydrated] = useState(false)
   const [theme, setTheme] = useState<ConsoleTheme>("dark")
-  const [locale, setLocale] = useState<ConsoleLocale>("zh")
+  const [locale, setLocale] = useState<ConsoleLocale>(DEFAULT_CONSOLE_LOCALE)
   const [timezone, setTimezone] = useState<ConsoleTimeZone>("local")
   const [isRefreshing, startRefreshing] = useTransition()
   const [connectionVersion, setConnectionVersion] = useState(0)
@@ -185,7 +190,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       setDraftSettings(persistedSettings)
       setUseCustomApiBaseUrl(Boolean(persistedSettings.apiBaseUrl.trim()))
       setTheme(persistedTheme === "light" ? "light" : "dark")
-      setLocale(persistedLocale === "en" ? "en" : "zh")
+      setLocale(resolveInitialConsoleLocale(persistedLocale, window.navigator))
       setTimezone(persistedTimezone === "utc" ? "utc" : "local")
       setLastSyncAt(null)
       setConnectionVersion(Date.now())
@@ -211,7 +216,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     }
 
     window.localStorage.setItem(LOCALE_KEY, locale)
-    document.documentElement.lang = locale === "zh" ? "zh-CN" : "en"
+    document.documentElement.lang = resolveConsoleHtmlLang(locale)
   }, [hydrated, locale])
 
   useEffect(() => {
@@ -250,7 +255,7 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
       }
 
       if (event.key === LOCALE_KEY) {
-        setLocale(event.newValue === "en" ? "en" : "zh")
+        setLocale(resolveConsoleLocale(event.newValue) ?? DEFAULT_CONSOLE_LOCALE)
         return
       }
 
@@ -397,9 +402,11 @@ export function ConsoleProvider({ children }: { children: ReactNode }) {
     locale,
     timezone,
     toggleTheme: () => setTheme((current) => (current === "dark" ? "light" : "dark")),
-    toggleLocale: () => setLocale((current) => (current === "zh" ? "en" : "zh")),
+    setTheme,
+    setLocale,
     toggleTimezone: () =>
       setTimezone((current) => (current === "local" ? "utc" : "local")),
+    setTimezone,
     settings,
     draftSettings,
     setDraftSettings,

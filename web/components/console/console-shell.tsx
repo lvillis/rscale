@@ -3,10 +3,25 @@
 import Image from "next/image"
 import Link from "next/link"
 import { usePathname, useRouter } from "next/navigation"
-import { Clock3, Command, Globe2, LogOut, Moon, RefreshCcw, Sun } from "lucide-react"
-import { useEffect, useState, type ReactNode } from "react"
+import {
+  Check,
+  Clock3,
+  Command,
+  Globe2,
+  LogOut,
+  Moon,
+  RefreshCcw,
+  Settings2,
+  Sun,
+} from "lucide-react"
+import { useEffect, useRef, useState, type ReactNode } from "react"
 
 import { Button } from "@/components/ui/button"
+import {
+  CONSOLE_LOCALES,
+  CONSOLE_LOCALE_META,
+  type ConsoleLocale,
+} from "@/lib/console-i18n"
 import { formatClockTime } from "@/lib/format"
 import {
   CommandPalette,
@@ -18,6 +33,7 @@ import { CONSOLE_COPY, CONSOLE_NAV_ITEMS, type ConsoleRouteKey } from "./strings
 import { useConsole } from "./console-context"
 
 function getRouteKey(pathname: string): ConsoleRouteKey {
+  if (pathname.startsWith("/monitoring")) return "monitoring"
   if (pathname.startsWith("/nodes")) return "nodes"
   if (pathname.startsWith("/access")) return "access"
   if (pathname.startsWith("/network")) return "network"
@@ -40,17 +56,19 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
   const currentRoute = getRouteKey(pathname)
   const [navigatingTo, setNavigatingTo] = useState<string | null>(null)
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false)
+  const [preferencesOpen, setPreferencesOpen] = useState(false)
+  const preferencesRef = useRef<HTMLDivElement | null>(null)
   const {
     hydrated,
     theme,
     locale,
     timezone,
     toggleTheme,
-    toggleLocale,
+    setTheme,
+    setLocale,
     toggleTimezone,
+    setTimezone,
     connectionReady,
-    connectionLabel,
-    runtimeOrigin,
     lastSyncAt,
     clearConnection,
     isRefreshing,
@@ -128,18 +146,39 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeyDown)
   }, [commandPaletteOpen, isRefreshing, refreshAll])
 
+  useEffect(() => {
+    if (!preferencesOpen || typeof window === "undefined") {
+      return
+    }
+
+    const onPointerDown = (event: PointerEvent) => {
+      if (!preferencesRef.current?.contains(event.target as globalThis.Node)) {
+        setPreferencesOpen(false)
+      }
+    }
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPreferencesOpen(false)
+      }
+    }
+
+    window.addEventListener("pointerdown", onPointerDown)
+    window.addEventListener("keydown", onKeyDown)
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown)
+      window.removeEventListener("keydown", onKeyDown)
+    }
+  }, [preferencesOpen])
+
   if (!hydrated || !connectionReady) {
     return <ShellLoadingState />
   }
 
-  const resolvedConnectionLabel =
-    connectionLabel === "current-origin" ? runtimeOrigin || copy.currentOrigin : connectionLabel
   const resolvedLastSync =
     lastSyncAt && Number.isFinite(lastSyncAt)
       ? formatClockTime(lastSyncAt, locale, timezone)
       : copy.common.never
-  const timezoneLabel =
-    timezone === "local" ? copy.timezoneLocal : copy.timezoneUtc
   const timezoneHint =
     timezone === "local" ? copy.common.localTime : copy.common.utcTime
   const isRouteTransitioning = navigatingTo !== null && navigatingTo !== pathname
@@ -158,6 +197,13 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
       setNavigatingTo(href)
     }
   }
+
+  const localeActionLabels = Object.fromEntries(
+    CONSOLE_LOCALES.map((targetLocale) => [
+      targetLocale,
+      `${copy.language}: ${CONSOLE_LOCALE_META[targetLocale].nativeLabel}`,
+    ])
+  ) as Record<ConsoleLocale, string>
 
   const commandItems = [
     ...CONSOLE_NAV_ITEMS.map((item) => ({
@@ -190,15 +236,24 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
       icon: theme === "dark" ? Sun : Moon,
       onSelect: () => toggleTheme(),
     },
-    {
-      id: "action:locale",
-      label: copy.commands.actions.locale,
+    ...CONSOLE_LOCALES.map((targetLocale) => ({
+      id: `action:locale:${targetLocale}`,
+      label: localeActionLabels[targetLocale],
       group: copy.commands.groups.actions,
-      hint: copy.localeToggle,
-      keywords: ["language", "locale", copy.localeToggle],
+      hint:
+        locale === targetLocale
+          ? copy.common.enabled
+          : CONSOLE_LOCALE_META[targetLocale].nativeLabel,
+      keywords: [
+        copy.language,
+        "language",
+        "locale",
+        CONSOLE_LOCALE_META[targetLocale].label,
+        CONSOLE_LOCALE_META[targetLocale].nativeLabel,
+      ],
       icon: Globe2,
-      onSelect: () => toggleLocale(),
-    },
+      onSelect: () => setLocale(targetLocale),
+    })),
     {
       id: "action:timezone",
       label: copy.commands.actions.timezone,
@@ -293,8 +348,16 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               })}
             </nav>
 
-            <div className="mt-auto px-3 pb-1 text-[11px] leading-5 text-muted-foreground">
-              {copy.independenceNotice}
+            <div className="mt-auto px-3 pb-1">
+              <div className="console-surface-soft rounded-[14px] border border-border/70 px-3 py-3">
+                <div className="console-eyebrow text-[10px] font-[510] tracking-[0.14em] uppercase text-muted-foreground">
+                  {copy.lastSync}
+                </div>
+                <div className="mt-2 font-mono text-[13px] text-foreground whitespace-nowrap">
+                  {resolvedLastSync}
+                </div>
+                <div className="mt-2 text-[11px] text-muted-foreground">{timezoneHint}</div>
+              </div>
             </div>
           </div>
         </aside>
@@ -311,52 +374,136 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
               </div>
 
               <div className="flex items-center gap-2">
-                <div className="console-surface-soft hidden max-w-[280px] items-center gap-2 rounded-[10px] px-3 py-2 text-[12px] text-secondary-foreground xl:flex">
-                  <span className="console-eyebrow shrink-0 text-[10px] font-[510] tracking-[0.14em] uppercase">
-                    {copy.connection}
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-foreground">
-                    {resolvedConnectionLabel}
-                  </span>
+                <div className="relative" ref={preferencesRef}>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="gap-2"
+                    onClick={() => setPreferencesOpen((current) => !current)}
+                    aria-expanded={preferencesOpen}
+                    aria-label={copy.preferences}
+                  >
+                    <Settings2 className="size-4" />
+                    <span className="hidden xl:inline">{copy.preferences}</span>
+                  </Button>
+                  {preferencesOpen ? (
+                    <div className="console-surface-elevated absolute top-full right-0 z-30 mt-2 w-[340px] rounded-[16px] border border-border p-3 shadow-[0_18px_40px_rgba(0,0,0,0.18)]">
+                      <div className="space-y-4">
+                        <div className="border-b border-border/70 px-1 pb-2">
+                          <div className="console-eyebrow text-[11px] font-[510] tracking-[0.14em] uppercase text-muted-foreground">
+                            {copy.preferences}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="px-1 text-[12px] text-muted-foreground">
+                            {copy.commands.actions.theme}
+                          </div>
+                          <div className="space-y-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="flex h-10 w-full items-center justify-between rounded-[10px] px-3"
+                              onClick={() => setTheme("dark")}
+                            >
+                              <span className="flex items-center gap-3">
+                                <Moon className="size-4" />
+                                {copy.themeDark}
+                              </span>
+                              {theme === "dark" ? <Check className="size-4 text-primary" /> : null}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="flex h-10 w-full items-center justify-between rounded-[10px] px-3"
+                              onClick={() => setTheme("light")}
+                            >
+                              <span className="flex items-center gap-3">
+                                <Sun className="size-4" />
+                                {copy.themeLight}
+                              </span>
+                              {theme === "light" ? <Check className="size-4 text-primary" /> : null}
+                            </Button>
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="px-1 text-[12px] text-muted-foreground">{copy.language}</div>
+                          <div className="space-y-1">
+                            {CONSOLE_LOCALES.map((targetLocale) => (
+                              <Button
+                                key={targetLocale}
+                                variant="ghost"
+                                size="sm"
+                                className="flex h-10 w-full items-center justify-between rounded-[10px] px-3"
+                                onClick={() => setLocale(targetLocale)}
+                              >
+                                <span className="flex items-center gap-3">
+                                  <span className="font-medium">
+                                    {CONSOLE_LOCALE_META[targetLocale].label}
+                                  </span>
+                                  <span className="text-[12px] text-muted-foreground">
+                                    {CONSOLE_LOCALE_META[targetLocale].nativeLabel}
+                                  </span>
+                                </span>
+                                {locale === targetLocale ? (
+                                  <Check className="size-4 text-primary" />
+                                ) : null}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
+                        <div className="space-y-2">
+                          <div className="px-1 text-[12px] text-muted-foreground">{copy.timezone}</div>
+                          <div className="space-y-1">
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="flex h-10 w-full items-center justify-between rounded-[10px] px-3"
+                              onClick={() => setTimezone("local")}
+                            >
+                              <span className="flex items-center gap-3">
+                                <Clock3 className="size-4" />
+                                {copy.timezoneLocal}
+                              </span>
+                              {timezone === "local" ? <Check className="size-4 text-primary" /> : null}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              className="flex h-10 w-full items-center justify-between rounded-[10px] px-3"
+                              onClick={() => setTimezone("utc")}
+                            >
+                              <span className="flex items-center gap-3">
+                                <Globe2 className="size-4" />
+                                {copy.timezoneUtc}
+                              </span>
+                              {timezone === "utc" ? <Check className="size-4 text-primary" /> : null}
+                            </Button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                <div className="console-surface-soft hidden max-w-[220px] items-center gap-2 rounded-[10px] px-3 py-2 text-[12px] text-secondary-foreground 2xl:flex">
-                  <span className="console-eyebrow shrink-0 text-[10px] font-[510] tracking-[0.14em] uppercase">
-                    {copy.lastSync}
-                  </span>
-                  <span className="truncate font-mono text-[11px] text-foreground">
-                    {resolvedLastSync}
-                  </span>
-                </div>
-                <Button variant="outline" size="sm" onClick={toggleTheme}>
-                  {theme === "dark" ? <Sun className="size-4" /> : <Moon className="size-4" />}
-                  {theme === "dark" ? copy.themeLight : copy.themeDark}
-                </Button>
-                <Button variant="outline" size="sm" onClick={toggleLocale}>
-                  <Globe2 className="size-4" />
-                  {copy.localeToggle}
-                </Button>
-                <Button variant="outline" size="sm" onClick={toggleTimezone}>
-                  <Clock3 className="size-4" />
-                  {timezoneLabel}
-                </Button>
                 <Button
                   variant="outline"
                   size="sm"
+                  className="px-2.5"
                   onClick={() => setCommandPaletteOpen(true)}
+                  aria-label={copy.commandPalette}
                 >
                   <Command className="size-4" />
-                  {copy.commandPalette}
                   <span className="ml-1 hidden font-mono text-[11px] text-muted-foreground xl:inline">
                     {copy.commandPaletteHint}
                   </span>
                 </Button>
-                <Button variant="outline" onClick={refreshAll} disabled={isRefreshing}>
-                  <RefreshCcw className={`size-4 ${isRefreshing ? "animate-spin" : ""}`} />
-                  {isRefreshing ? copy.refreshing : copy.refresh}
-                </Button>
-                <Button variant="outline" onClick={onSignOut}>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="px-2.5"
+                  onClick={onSignOut}
+                  aria-label={copy.signOut}
+                >
                   <LogOut className="size-4" />
-                  {copy.signOut}
                 </Button>
               </div>
             </div>
