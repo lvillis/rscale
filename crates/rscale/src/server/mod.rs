@@ -10,7 +10,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, Request, State};
-use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, LOCATION, WWW_AUTHENTICATE};
+use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, LOCATION, WWW_AUTHENTICATE};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -337,15 +337,14 @@ fn embedded_tls_required(config: &AppConfig, effective_derp_map: &ControlDerpMap
             .flat_map(|region| region.nodes.iter())
             .find(|node| node.name == node_name)
     {
-        return !node.insecure_for_tests && !node.stun_only;
+        return !node.stun_only;
     }
 
-    config
-        .derp
+    effective_derp_map
         .regions
-        .iter()
+        .values()
         .flat_map(|region| region.nodes.iter())
-        .any(|node| !node.insecure_for_tests && !node.stun_only)
+        .any(|node| !node.stun_only)
 }
 
 async fn stream_looks_like_tls(stream: &TcpStream) -> AppResult<bool> {
@@ -941,6 +940,7 @@ async fn handle_control_request(
     protocol_version: u16,
     config: AppConfig,
 ) -> Result<HyperResponse<Body>, std::convert::Infallible> {
+    let advertised_derp_host = request_authority_host(&request).map(str::to_string);
     let ssh_action_path = parse_ssh_action_path(request.uri().path());
     let response = match (request.method(), request.uri().path()) {
         (&Method::POST, "/machine/register") => {
@@ -971,6 +971,7 @@ async fn handle_control_request(
                         match build_streaming_map_body(
                             control_service,
                             node.node.id,
+                            advertised_derp_host.clone(),
                             map_request.compress.clone(),
                             map_request.keep_alive,
                             config.server.map_poll_interval_secs,
@@ -983,7 +984,12 @@ async fn handle_control_request(
                         }
                     } else {
                         match control_service
-                            .build_one_shot_map(node.node.id, 1, None)
+                            .build_one_shot_map(
+                                node.node.id,
+                                1,
+                                None,
+                                advertised_derp_host.as_deref(),
+                            )
                             .await
                             .and_then(|response| {
                                 encode_map_response_frame(&response, &map_request.compress)
@@ -1036,13 +1042,16 @@ async fn handle_control_request(
 async fn build_streaming_map_body(
     control_service: ControlService,
     node_id: u64,
+    advertised_derp_host: Option<String>,
     compress: String,
     _client_requested_keep_alive: bool,
     poll_interval_secs: u64,
     keepalive_interval_secs: u64,
 ) -> AppResult<Body> {
     let (_session_handle, initial_response, mut last_signature) =
-        control_service.build_stream_state(node_id, 1).await?;
+        control_service
+            .build_stream_state(node_id, 1, advertised_derp_host.as_deref())
+            .await?;
     let initial_frame = encode_map_response_frame(&initial_response, &compress)?;
     let mut last_full_response = initial_response.clone();
     let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
@@ -1056,6 +1065,13 @@ async fn build_streaming_map_body(
         let mut next_seq = 2_i64;
         let mut poll_tick = time::interval(Duration::from_secs(poll_interval_secs));
         let mut keepalive_tick = time::interval(Duration::from_secs(keepalive_interval_secs));
+        let update_context = StreamUpdateContext {
+            sender: &sender,
+            control_service: &control_service,
+            node_id,
+            advertised_derp_host: advertised_derp_host.as_deref(),
+            compress: &compress,
+        };
         poll_tick.tick().await;
         keepalive_tick.tick().await;
 
@@ -1065,13 +1081,10 @@ async fn build_streaming_map_body(
                     match changed {
                         Ok(()) => {
                             match enqueue_stream_update(
-                                &sender,
-                                &control_service,
-                                node_id,
+                                &update_context,
                                 next_seq,
                                 &mut last_full_response,
                                 &mut last_signature,
-                                &compress,
                             ).await {
                                 StreamUpdateOutcome::Sent => {
                                     next_seq += 1;
@@ -1085,13 +1098,10 @@ async fn build_streaming_map_body(
                 }
                 _ = poll_tick.tick() => {
                     match enqueue_stream_update(
-                        &sender,
-                        &control_service,
-                        node_id,
+                        &update_context,
                         next_seq,
                         &mut last_full_response,
                         &mut last_signature,
-                        &compress,
                     ).await {
                         StreamUpdateOutcome::Sent => {
                             next_seq += 1;
@@ -1122,15 +1132,16 @@ async fn build_streaming_map_body(
 }
 
 async fn enqueue_stream_update(
-    sender: &mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
-    control_service: &ControlService,
-    node_id: u64,
+    context: &StreamUpdateContext<'_>,
     seq: i64,
     last_full_response: &mut MapResponse,
     last_signature: &mut Vec<u8>,
-    compress: &str,
 ) -> StreamUpdateOutcome {
-    match control_service.refresh_stream_state(node_id, seq).await {
+    match context
+        .control_service
+        .refresh_stream_state(context.node_id, seq, context.advertised_derp_host)
+        .await
+    {
         Ok((response, signature)) => {
             if signature == *last_signature {
                 return StreamUpdateOutcome::Unchanged;
@@ -1142,9 +1153,9 @@ async fn enqueue_stream_update(
                 return StreamUpdateOutcome::Unchanged;
             };
 
-            match encode_map_response_frame(&delta, compress) {
+            match encode_map_response_frame(&delta, context.compress) {
                 Ok(frame) => {
-                    if sender.send(Ok(frame)).await.is_err() {
+                    if context.sender.send(Ok(frame)).await.is_err() {
                         return StreamUpdateOutcome::Failed;
                     }
                     *last_signature = signature;
@@ -1152,7 +1163,8 @@ async fn enqueue_stream_update(
                     StreamUpdateOutcome::Sent
                 }
                 Err(err) => {
-                    let _ = sender
+                    let _ = context
+                        .sender
                         .send(Err(std::io::Error::other(err.to_string())))
                         .await;
                     StreamUpdateOutcome::Failed
@@ -1160,7 +1172,8 @@ async fn enqueue_stream_update(
             }
         }
         Err(err) => {
-            let _ = sender
+            let _ = context
+                .sender
                 .send(Err(std::io::Error::other(err.to_string())))
                 .await;
             StreamUpdateOutcome::Failed
@@ -1172,6 +1185,14 @@ enum StreamUpdateOutcome {
     Sent,
     Unchanged,
     Failed,
+}
+
+struct StreamUpdateContext<'a> {
+    sender: &'a mpsc::Sender<Result<Vec<u8>, std::io::Error>>,
+    control_service: &'a ControlService,
+    node_id: u64,
+    advertised_derp_host: Option<&'a str>,
+    compress: &'a str,
 }
 
 async fn decode_json_request<T: serde::de::DeserializeOwned>(
@@ -1220,6 +1241,40 @@ fn parse_ssh_action_path(path: &str) -> Option<(u64, u64)> {
     let src_node_id = parts[4].parse::<u64>().ok()?;
     let dst_node_id = parts[6].parse::<u64>().ok()?;
     Some((src_node_id, dst_node_id))
+}
+
+fn request_authority_host(request: &HyperRequest<Incoming>) -> Option<&str> {
+    request
+        .uri()
+        .authority()
+        .map(|authority| authority.host())
+        .or_else(|| {
+            request
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+                .and_then(authority_host)
+        })
+}
+
+fn authority_host(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(stripped) = value.strip_prefix('[') {
+        return stripped.split_once(']').map(|(host, _)| host);
+    }
+
+    if let Some((host, port)) = value.rsplit_once(':')
+        && !host.contains(':')
+        && port.parse::<u16>().is_ok()
+    {
+        return Some(host);
+    }
+
+    Some(value)
 }
 
 fn control_error_response(error: AppError) -> HyperResponse<Body> {
@@ -1808,7 +1863,7 @@ async fn admin_derp_map(State(state): State<AppState>) -> Json<DerpRuntimeStatus
 
 async fn list_nodes(State(state): State<AppState>) -> Result<Json<Vec<Node>>, ApiError> {
     let database = state.database()?;
-    let nodes = database.list_nodes().await.map_err(ApiError::from)?;
+    let nodes = database.list_admin_nodes().await.map_err(ApiError::from)?;
     Ok(Json(nodes))
 }
 
@@ -1817,7 +1872,7 @@ async fn get_node(
     Path(id): Path<u64>,
 ) -> Result<Json<Node>, ApiError> {
     let database = state.database()?;
-    let node = database.get_node(id).await.map_err(ApiError::from)?;
+    let node = database.get_admin_node(id).await.map_err(ApiError::from)?;
     Ok(Json(node))
 }
 
@@ -1831,6 +1886,7 @@ async fn create_node(
         .create_node(&request.into(), &actor)
         .await
         .map_err(ApiError::from)?;
+    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -1845,6 +1901,7 @@ async fn update_node(
         .update_node(id, &request.into(), &actor)
         .await
         .map_err(ApiError::from)?;
+    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
     Ok(Json(node))
 }
 
@@ -1858,6 +1915,7 @@ async fn disable_node(
         .disable_node(id, &actor)
         .await
         .map_err(ApiError::from)?;
+    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
     Ok(Json(node))
 }
 
@@ -2550,6 +2608,18 @@ mod tests {
             .uri(uri)
             .header(AUTHORIZATION, format!("Bearer {TEST_ADMIN_TOKEN}"))
             .body(Body::empty())?)
+    }
+
+    #[test]
+    fn embedded_tls_required_for_insecure_test_derp_nodes() {
+        let mut config = test_config();
+        config.derp.server.enabled = true;
+        config.derp.server.node_name = Some("900a".to_string());
+        config.derp.regions[0].nodes[0].derp_port = 8080;
+        config.derp.regions[0].nodes[0].insecure_for_tests = true;
+
+        let derp_map = crate::protocol::config_derp_map(&config.derp);
+        assert!(embedded_tls_required(&config, &derp_map));
     }
 
     #[tokio::test]

@@ -35,7 +35,7 @@ httparse = { version = "1.10.1", default-features = false, features = ["std"] }
 hyper = { version = "1.9.0", default-features = false, features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1.20", default-features = false, features = ["http1", "http2", "server", "tokio"] }
 reqx = { version = "0.1.34", default-features = false, features = ["async-tls-rustls-ring"] }
-tokio = { version = "1.52.0", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.52.1", default-features = false, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
 tokio-stream = { version = "0.1.17", default-features = false, features = ["sync"] }
 tokio-tungstenite = { version = "0.29.0", default-features = false, features = ["connect", "handshake", "rustls-tls-native-roots"] }

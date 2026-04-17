@@ -205,6 +205,42 @@ impl PostgresStore {
         rows.into_iter().map(map_node_row).collect()
     }
 
+    pub async fn list_admin_nodes(&self) -> AppResult<Vec<Node>> {
+        let now_unix_secs = now_unix_secs()?;
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id,
+                stable_id,
+                name,
+                hostname,
+                auth_key_id,
+                principal_id,
+                ipv4,
+                ipv6,
+                status,
+                tags,
+                tag_source,
+                EXTRACT(EPOCH FROM session_expires_at)::bigint AS session_expires_at_unix_secs,
+                last_seen_unix_secs
+            FROM nodes
+            ORDER BY id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter()
+            .map(|row| {
+                map_admin_node_row(
+                    row,
+                    now_unix_secs,
+                    self.network.node_online_window_secs,
+                )
+            })
+            .collect()
+    }
+
     pub async fn count_nodes(&self) -> AppResult<u64> {
         let count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM nodes")
             .fetch_one(&self.pool)
@@ -238,6 +274,42 @@ impl PostgresStore {
 
         match row {
             Some(row) => map_node_row(row),
+            None => Err(AppError::NotFound(format!("node {node_id}"))),
+        }
+    }
+
+    pub async fn get_admin_node(&self, node_id: u64) -> AppResult<Node> {
+        let now_unix_secs = now_unix_secs()?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                stable_id,
+                name,
+                hostname,
+                auth_key_id,
+                principal_id,
+                ipv4,
+                ipv6,
+                status,
+                tags,
+                tag_source,
+                EXTRACT(EPOCH FROM session_expires_at)::bigint AS session_expires_at_unix_secs,
+                last_seen_unix_secs
+            FROM nodes
+            WHERE id = $1
+            "#,
+        )
+        .bind(u64_to_i64(node_id)?)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => map_admin_node_row(
+                row,
+                now_unix_secs,
+                self.network.node_online_window_secs,
+            ),
             None => Err(AppError::NotFound(format!("node {node_id}"))),
         }
     }
@@ -1986,6 +2058,26 @@ pub(super) fn map_node_row(row: sqlx::postgres::PgRow) -> AppResult<Node> {
     })
 }
 
+pub(super) fn map_admin_node_row(
+    row: sqlx::postgres::PgRow,
+    now_unix_secs: u64,
+    online_window_secs: u64,
+) -> AppResult<Node> {
+    let session_expires_at_unix_secs = row
+        .get::<Option<i64>, _>("session_expires_at_unix_secs")
+        .map(i64_to_u64)
+        .transpose()?;
+    let mut node = map_node_row(row)?;
+    node.status = effective_admin_node_status(
+        node.status.clone(),
+        node.last_seen_unix_secs,
+        session_expires_at_unix_secs,
+        now_unix_secs,
+        online_window_secs,
+    );
+    Ok(node)
+}
+
 pub(super) fn map_principal_row(row: sqlx::postgres::PgRow) -> AppResult<Principal> {
     Ok(Principal {
         id: i64_to_u64(row.get::<i64, _>("id"))?,
@@ -2305,6 +2397,33 @@ fn effective_node_status(mut node: Node, now_unix_secs: u64, online_window_secs:
     node
 }
 
+fn effective_admin_node_status(
+    status: NodeStatus,
+    last_seen_unix_secs: Option<u64>,
+    session_expires_at_unix_secs: Option<u64>,
+    now_unix_secs: u64,
+    online_window_secs: u64,
+) -> NodeStatus {
+    match status {
+        NodeStatus::Disabled | NodeStatus::Pending | NodeStatus::Expired => status,
+        NodeStatus::Online | NodeStatus::Offline => {
+            if session_expires_at_unix_secs.is_some_and(|expiry| expiry <= now_unix_secs) {
+                return NodeStatus::Expired;
+            }
+
+            match last_seen_unix_secs {
+                Some(last_seen)
+                    if now_unix_secs.saturating_sub(last_seen) <= online_window_secs =>
+                {
+                    NodeStatus::Online
+                }
+                Some(_) => NodeStatus::Offline,
+                None => NodeStatus::Pending,
+            }
+        }
+    }
+}
+
 fn restored_node_status(status: &NodeStatus) -> NodeStatus {
     match status {
         NodeStatus::Online => NodeStatus::Offline,
@@ -2423,6 +2542,45 @@ mod tests {
 
         apply_remote_control_notification(&control_updates, "instance-a", "instance-b");
         assert_eq!(*control_updates.borrow(), 1);
+    }
+
+    #[test]
+    fn effective_admin_node_status_uses_runtime_presence_and_session_expiry() {
+        let now = 10_000;
+        let online_window = 120;
+
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Disabled, Some(now), Some(now + 60), now, online_window),
+            NodeStatus::Disabled
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Pending, None, None, now, online_window),
+            NodeStatus::Pending
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Expired, Some(now), Some(now - 1), now, online_window),
+            NodeStatus::Expired
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Online, Some(now - 30), Some(now + 600), now, online_window),
+            NodeStatus::Online
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Online, Some(now - 300), Some(now + 600), now, online_window),
+            NodeStatus::Offline
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Offline, Some(now - 30), Some(now + 600), now, online_window),
+            NodeStatus::Online
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Online, Some(now - 30), Some(now - 1), now, online_window),
+            NodeStatus::Expired
+        );
+        assert_eq!(
+            effective_admin_node_status(NodeStatus::Online, None, Some(now + 600), now, online_window),
+            NodeStatus::Pending
+        );
     }
 
     #[test]

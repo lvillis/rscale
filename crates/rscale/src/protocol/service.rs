@@ -164,8 +164,11 @@ impl ControlService {
         node_id: u64,
         seq: i64,
         session_handle: Option<&str>,
+        advertised_derp_host: Option<&str>,
     ) -> AppResult<MapResponse> {
-        let mut response = self.build_map_state(node_id).await?;
+        let mut response = self
+            .build_map_state(node_id, advertised_derp_host)
+            .await?;
         response.seq = seq;
         response.control_time = Some(now_rfc3339()?);
         if let Some(session_handle) = session_handle {
@@ -182,9 +185,12 @@ impl ControlService {
         &self,
         node_id: u64,
         seq: i64,
+        advertised_derp_host: Option<&str>,
     ) -> AppResult<(String, MapResponse, Vec<u8>)> {
         let session_handle = Uuid::new_v4().to_string();
-        let mut response = self.build_map_state(node_id).await?;
+        let mut response = self
+            .build_map_state(node_id, advertised_derp_host)
+            .await?;
         response.seq = seq;
         response.map_session_handle = session_handle.clone();
         response.control_time = Some(now_rfc3339()?);
@@ -200,8 +206,11 @@ impl ControlService {
         &self,
         node_id: u64,
         seq: i64,
+        advertised_derp_host: Option<&str>,
     ) -> AppResult<(MapResponse, Vec<u8>)> {
-        let mut response = self.build_map_state(node_id).await?;
+        let mut response = self
+            .build_map_state(node_id, advertised_derp_host)
+            .await?;
         response.seq = seq;
         response.control_time = Some(now_rfc3339()?);
         let signature = response_signature(&response)?;
@@ -380,12 +389,16 @@ impl ControlService {
         }
     }
 
-    async fn build_map_state(&self, node_id: u64) -> AppResult<MapResponse> {
+    async fn build_map_state(
+        &self,
+        node_id: u64,
+        advertised_derp_host: Option<&str>,
+    ) -> AppResult<MapResponse> {
         let all_nodes = self.store.list_control_nodes().await?;
         let routes = self.store.list_routes().await?;
         let policy = self.store.load_policy().await?;
         let dns = self.store.load_dns_config().await?;
-        let derp_map = self.derp.effective_map();
+        let derp_map = self.advertised_derp_map(advertised_derp_host);
         let self_node = all_nodes
             .iter()
             .find(|node| node.node.id == node_id)
@@ -510,6 +523,26 @@ impl ControlService {
             deprecated_default_auto_update,
             ..MapResponse::default()
         })
+    }
+
+    fn advertised_derp_map(&self, advertised_derp_host: Option<&str>) -> ControlDerpMap {
+        let derp_map = self.derp.effective_map();
+        let advertised_host = advertised_derp_host
+            .filter(|host| !host.trim().is_empty())
+            .map(str::trim)
+            .or_else(|| {
+                self.config
+                    .server
+                    .public_base_url
+                    .as_deref()
+                    .and_then(public_base_url_host)
+            });
+
+        let Some(advertised_host) = advertised_host else {
+            return derp_map;
+        };
+
+        rewrite_local_derp_hosts(derp_map, advertised_host)
     }
 
     fn to_tail_node(
@@ -1726,6 +1759,54 @@ fn now_unix_secs() -> AppResult<u64> {
     })
 }
 
+fn public_base_url_host(value: &str) -> Option<&str> {
+    let (_, remainder) = value.split_once("://")?;
+    let authority = remainder.split('/').next()?.trim();
+    authority_host(authority)
+}
+
+fn authority_host(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    if let Some(stripped) = value.strip_prefix('[') {
+        return stripped.split_once(']').map(|(host, _)| host);
+    }
+
+    if let Some((host, port)) = value.rsplit_once(':')
+        && !host.contains(':')
+        && port.parse::<u16>().is_ok()
+    {
+        return Some(host);
+    }
+
+    Some(value)
+}
+
+fn is_local_only_derp_host(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1" | "[::1]" | "0.0.0.0"
+    )
+}
+
+fn rewrite_local_derp_hosts(
+    mut derp_map: ControlDerpMap,
+    advertised_host: &str,
+) -> ControlDerpMap {
+    for region in derp_map.regions.values_mut() {
+        for node in &mut region.nodes {
+            if is_local_only_derp_host(&node.host_name) {
+                node.host_name = advertised_host.to_string();
+            }
+        }
+    }
+
+    derp_map
+}
+
 fn format_unix_secs(value: u64) -> AppResult<String> {
     let timestamp = i64::try_from(value).map_err(|_| {
         crate::error::AppError::Bootstrap(format!("timestamp {value} cannot be represented as i64"))
@@ -1774,6 +1855,43 @@ mod tests {
             node_key_signature: None,
             tailnet: String::new(),
         }
+    }
+
+    #[test]
+    fn rewrite_local_derp_hosts_replaces_only_local_nodes() -> TestResult {
+        let derp_map = ControlDerpMap {
+            regions: BTreeMap::from([(
+                900,
+                crate::protocol::ControlDerpRegion {
+                    region_id: 900,
+                    region_code: "sha".to_string(),
+                    region_name: "Shanghai".to_string(),
+                    nodes: vec![
+                        crate::protocol::ControlDerpNode {
+                            name: "embedded".to_string(),
+                            host_name: "localhost".to_string(),
+                            ..crate::protocol::ControlDerpNode::default()
+                        },
+                        crate::protocol::ControlDerpNode {
+                            name: "public".to_string(),
+                            host_name: "derp.example.com".to_string(),
+                            ..crate::protocol::ControlDerpNode::default()
+                        },
+                    ],
+                    ..crate::protocol::ControlDerpRegion::default()
+                },
+            )]),
+            ..ControlDerpMap::default()
+        };
+
+        let rewritten = rewrite_local_derp_hosts(derp_map, "control.example.com");
+        let region = rewritten
+            .regions
+            .get(&900)
+            .ok_or_else(|| std::io::Error::other("region should exist"))?;
+        assert_eq!(region.nodes[0].host_name, "control.example.com");
+        assert_eq!(region.nodes[1].host_name, "derp.example.com");
+        Ok(())
     }
 
     #[test]
