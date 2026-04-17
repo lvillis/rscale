@@ -2,6 +2,8 @@ ARG RUST_VERSION=1.95.0
 
 FROM node:22-trixie-slim AS web-builder
 
+ARG TARGETPLATFORM
+
 ENV PNPM_HOME=/pnpm
 ENV PATH="${PNPM_HOME}:${PATH}"
 
@@ -10,27 +12,31 @@ RUN corepack enable
 WORKDIR /work/web
 
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
-RUN --mount=type=cache,target=/pnpm/store \
+RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile
 
 COPY web/ ./
-RUN --mount=type=cache,target=/pnpm/store \
+RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
     pnpm build
 
 FROM rust:${RUST_VERSION}-trixie AS rust-builder
+
+ARG TARGETPLATFORM
 
 WORKDIR /work
 
 COPY Cargo.toml Cargo.lock ./
 COPY crates/rscale ./crates/rscale
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git/db \
-    --mount=type=cache,target=/work/target \
+RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git-${TARGETPLATFORM},target=/usr/local/cargo/git/db,sharing=locked \
+    --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/work/target,sharing=locked \
     cargo build --release --package rscale
 
 
 FROM debian:trixie-slim AS runtime
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
