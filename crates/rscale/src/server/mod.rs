@@ -1048,10 +1048,9 @@ async fn build_streaming_map_body(
     poll_interval_secs: u64,
     keepalive_interval_secs: u64,
 ) -> AppResult<Body> {
-    let (_session_handle, initial_response, mut last_signature) =
-        control_service
-            .build_stream_state(node_id, 1, advertised_derp_host.as_deref())
-            .await?;
+    let (_session_handle, initial_response, mut last_signature) = control_service
+        .build_stream_state(node_id, 1, advertised_derp_host.as_deref())
+        .await?;
     let initial_frame = encode_map_response_frame(&initial_response, &compress)?;
     let mut last_full_response = initial_response.clone();
     let (sender, receiver) = mpsc::channel::<Result<Vec<u8>, std::io::Error>>(8);
@@ -1886,7 +1885,10 @@ async fn create_node(
         .create_node(&request.into(), &actor)
         .await
         .map_err(ApiError::from)?;
-    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
+    let node = database
+        .get_admin_node(node.id)
+        .await
+        .map_err(ApiError::from)?;
     Ok((StatusCode::CREATED, Json(node)))
 }
 
@@ -1901,7 +1903,10 @@ async fn update_node(
         .update_node(id, &request.into(), &actor)
         .await
         .map_err(ApiError::from)?;
-    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
+    let node = database
+        .get_admin_node(node.id)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(node))
 }
 
@@ -1915,7 +1920,10 @@ async fn disable_node(
         .disable_node(id, &actor)
         .await
         .map_err(ApiError::from)?;
-    let node = database.get_admin_node(node.id).await.map_err(ApiError::from)?;
+    let node = database
+        .get_admin_node(node.id)
+        .await
+        .map_err(ApiError::from)?;
     Ok(Json(node))
 }
 

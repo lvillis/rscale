@@ -166,9 +166,7 @@ impl ControlService {
         session_handle: Option<&str>,
         advertised_derp_host: Option<&str>,
     ) -> AppResult<MapResponse> {
-        let mut response = self
-            .build_map_state(node_id, advertised_derp_host)
-            .await?;
+        let mut response = self.build_map_state(node_id, advertised_derp_host).await?;
         response.seq = seq;
         response.control_time = Some(now_rfc3339()?);
         if let Some(session_handle) = session_handle {
@@ -188,9 +186,7 @@ impl ControlService {
         advertised_derp_host: Option<&str>,
     ) -> AppResult<(String, MapResponse, Vec<u8>)> {
         let session_handle = Uuid::new_v4().to_string();
-        let mut response = self
-            .build_map_state(node_id, advertised_derp_host)
-            .await?;
+        let mut response = self.build_map_state(node_id, advertised_derp_host).await?;
         response.seq = seq;
         response.map_session_handle = session_handle.clone();
         response.control_time = Some(now_rfc3339()?);
@@ -208,9 +204,7 @@ impl ControlService {
         seq: i64,
         advertised_derp_host: Option<&str>,
     ) -> AppResult<(MapResponse, Vec<u8>)> {
-        let mut response = self
-            .build_map_state(node_id, advertised_derp_host)
-            .await?;
+        let mut response = self.build_map_state(node_id, advertised_derp_host).await?;
         response.seq = seq;
         response.control_time = Some(now_rfc3339()?);
         let signature = response_signature(&response)?;
@@ -1792,10 +1786,7 @@ fn is_local_only_derp_host(value: &str) -> bool {
     )
 }
 
-fn rewrite_local_derp_hosts(
-    mut derp_map: ControlDerpMap,
-    advertised_host: &str,
-) -> ControlDerpMap {
+fn rewrite_local_derp_hosts(mut derp_map: ControlDerpMap, advertised_host: &str) -> ControlDerpMap {
     for region in derp_map.regions.values_mut() {
         for node in &mut region.nodes {
             if is_local_only_derp_host(&node.host_name) {

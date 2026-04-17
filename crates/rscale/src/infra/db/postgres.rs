@@ -231,13 +231,7 @@ impl PostgresStore {
         .await?;
 
         rows.into_iter()
-            .map(|row| {
-                map_admin_node_row(
-                    row,
-                    now_unix_secs,
-                    self.network.node_online_window_secs,
-                )
-            })
+            .map(|row| map_admin_node_row(row, now_unix_secs, self.network.node_online_window_secs))
             .collect()
     }
 
@@ -305,11 +299,9 @@ impl PostgresStore {
         .await?;
 
         match row {
-            Some(row) => map_admin_node_row(
-                row,
-                now_unix_secs,
-                self.network.node_online_window_secs,
-            ),
+            Some(row) => {
+                map_admin_node_row(row, now_unix_secs, self.network.node_online_window_secs)
+            }
             None => Err(AppError::NotFound(format!("node {node_id}"))),
         }
     }
@@ -2550,7 +2542,13 @@ mod tests {
         let online_window = 120;
 
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Disabled, Some(now), Some(now + 60), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Disabled,
+                Some(now),
+                Some(now + 60),
+                now,
+                online_window
+            ),
             NodeStatus::Disabled
         );
         assert_eq!(
@@ -2558,27 +2556,63 @@ mod tests {
             NodeStatus::Pending
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Expired, Some(now), Some(now - 1), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Expired,
+                Some(now),
+                Some(now - 1),
+                now,
+                online_window
+            ),
             NodeStatus::Expired
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Online, Some(now - 30), Some(now + 600), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Online,
+                Some(now - 30),
+                Some(now + 600),
+                now,
+                online_window
+            ),
             NodeStatus::Online
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Online, Some(now - 300), Some(now + 600), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Online,
+                Some(now - 300),
+                Some(now + 600),
+                now,
+                online_window
+            ),
             NodeStatus::Offline
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Offline, Some(now - 30), Some(now + 600), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Offline,
+                Some(now - 30),
+                Some(now + 600),
+                now,
+                online_window
+            ),
             NodeStatus::Online
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Online, Some(now - 30), Some(now - 1), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Online,
+                Some(now - 30),
+                Some(now - 1),
+                now,
+                online_window
+            ),
             NodeStatus::Expired
         );
         assert_eq!(
-            effective_admin_node_status(NodeStatus::Online, None, Some(now + 600), now, online_window),
+            effective_admin_node_status(
+                NodeStatus::Online,
+                None,
+                Some(now + 600),
+                now,
+                online_window
+            ),
             NodeStatus::Pending
         );
     }
