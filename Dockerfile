@@ -1,4 +1,4 @@
-ARG RUST_VERSION=1.95.0
+ARG RUST_VERSION=1.96.0
 
 FROM node:22-trixie-slim AS web-builder
 
