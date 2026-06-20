@@ -85,9 +85,14 @@ jobs:
             --push
             --provenance=false
             --sbom=false
-            --cache-from "type=registry,ref=${IMAGE}:buildcache"
-            --cache-to "type=registry,ref=${IMAGE}:buildcache,mode=max"
+            --cache-to "type=registry,ref=${IMAGE}:buildcache,mode=max,ignore-error=true"
           )
+
+          if docker buildx imagetools inspect "${IMAGE}:buildcache" >/dev/null 2>&1; then
+            build_args+=(--cache-from "type=registry,ref=${IMAGE}:buildcache")
+          else
+            echo "No registry build cache found for ${IMAGE}:buildcache; building without cache import."
+          fi
 
           IFS=',' read -ra tag_values <<<"${TAGS}"
           for tag in "${tag_values[@]}"; do

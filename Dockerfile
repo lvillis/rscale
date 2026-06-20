@@ -13,7 +13,7 @@ WORKDIR /work/web
 
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
-    pnpm install --frozen-lockfile
+    pnpm install --frozen-lockfile --store-dir /pnpm/store
 
 COPY web/ ./
 RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
