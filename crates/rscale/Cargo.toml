@@ -1,6 +1,6 @@
 [package]
 name = "rscale"
-version = "0.1.2"
+version = "0.1.3"
 description = "Self-hosted Rust control plane for operating a single tailnet with Tailscale clients"
 edition = "2024"
 rust-version = "1.96.0"
