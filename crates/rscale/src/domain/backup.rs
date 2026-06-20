@@ -9,12 +9,37 @@ pub struct BackupAuthKey {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupControlNodeState {
+    pub node_id: u64,
+    pub machine_key: String,
+    pub node_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disco_key: Option<String>,
+    #[serde(default)]
+    pub hostinfo: serde_json::Value,
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_expiry_unix_secs: Option<u64>,
+    pub map_request_version: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_session_handle: Option<String>,
+    pub map_session_seq: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_control_seen_at_unix_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_map_poll_at_unix_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct BackupSnapshot {
     pub format_version: u32,
     pub generated_at_unix_secs: u64,
     #[serde(default)]
     pub principals: Vec<Principal>,
     pub nodes: Vec<Node>,
+    #[serde(default)]
+    pub control_nodes: Vec<BackupControlNodeState>,
     pub auth_keys: Vec<BackupAuthKey>,
     pub policy: AclPolicy,
     pub dns: DnsConfig,
@@ -54,6 +79,7 @@ mod tests {
         }))?;
 
         assert!(snapshot.principals.is_empty());
+        assert!(snapshot.control_nodes.is_empty());
         assert!(snapshot.routes.is_empty());
         Ok(())
     }
@@ -87,6 +113,20 @@ mod tests {
                 tags: vec!["tag:prod".to_string()],
                 tag_source: NodeTagSource::AuthKey,
                 last_seen_unix_secs: Some(1_700_000_100),
+            }],
+            control_nodes: vec![BackupControlNodeState {
+                node_id: 10,
+                machine_key: "mkey:test-machine".to_string(),
+                node_key: "nodekey:test-node".to_string(),
+                disco_key: Some("discokey:test-disco".to_string()),
+                hostinfo: serde_json::json!({ "Hostname": "node-10" }),
+                endpoints: vec!["127.0.0.1:12345".to_string()],
+                key_expiry_unix_secs: Some(1_800_000_000),
+                map_request_version: 1,
+                map_session_handle: Some("session-1".to_string()),
+                map_session_seq: 42,
+                last_control_seen_at_unix_secs: Some(1_700_000_101),
+                last_map_poll_at_unix_secs: Some(1_700_000_102),
             }],
             auth_keys: vec![BackupAuthKey {
                 auth_key: AuthKey {

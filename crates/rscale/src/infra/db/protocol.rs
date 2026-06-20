@@ -148,10 +148,11 @@ impl PostgresStore {
 
         let existing = sqlx::query(
             r#"
-            SELECT node_id, node_key
-            FROM node_control_state
-            WHERE machine_key = $1
-            FOR UPDATE
+            SELECT c.node_id, c.node_key, n.status
+            FROM node_control_state c
+            INNER JOIN nodes n ON n.id = c.node_id
+            WHERE c.machine_key = $1
+            FOR UPDATE OF c, n
             "#,
         )
         .bind(machine_key)
@@ -160,6 +161,7 @@ impl PostgresStore {
 
         let node_id = if let Some(existing) = existing {
             let node_id = i64_to_u64(existing.get::<i64, _>("node_id"))?;
+            reject_disabled_control_node(&existing.get::<String, _>("status"))?;
             let current_node_key = existing.get::<String, _>("node_key");
             if !request.old_node_key.is_empty()
                 && request.old_node_key != current_node_key
@@ -216,18 +218,18 @@ impl PostgresStore {
             } else if !request_tags.is_empty() {
                 return Err(requested_tags_not_permitted_error(&request_tags));
             }
-            let principal = self.load_route_principal(node.principal_id).await?;
+            let principal = load_route_principal_tx(&mut tx, node.principal_id).await?;
             self.sync_advertised_routes_tx(&mut tx, &node, principal.as_ref(), &hostinfo, &actor)
                 .await?;
 
             node_id
         } else {
-            let auth_key = authenticate_protocol_auth_key(request.auth.as_ref())?;
-            let authenticated_auth_key = self.authenticate_auth_key(&mut tx, auth_key).await?;
             let request_tags = parse_request_tags(&hostinfo)?;
             if !request_tags.is_empty() {
                 return Err(requested_tags_not_permitted_error(&request_tags));
             }
+            let auth_key = authenticate_protocol_auth_key(request.auth.as_ref())?;
+            let authenticated_auth_key = self.authenticate_auth_key(&mut tx, auth_key).await?;
             let hostname = protocol_hostname(&hostinfo)
                 .unwrap_or_else(|| fallback_protocol_hostname(machine_key));
             let name = format!("{hostname}-{}", short_machine_key(machine_key));
@@ -460,10 +462,11 @@ impl PostgresStore {
                 principal_email = $4,
                 principal_name = $5,
                 principal_groups = $6,
-                completed_at = COALESCE(completed_at, now()),
+                completed_at = now(),
                 updated_at = now()
             WHERE id = $1
               AND expires_at > now()
+              AND completed_at IS NULL
             RETURNING
                 id,
                 machine_key,
@@ -493,7 +496,7 @@ impl PostgresStore {
         match row {
             Some(row) => map_oidc_auth_request_row(row),
             None => Err(AppError::Unauthorized(
-                "OIDC auth request is missing or expired".to_string(),
+                "OIDC auth request is missing, expired, or already completed".to_string(),
             )),
         }
     }
@@ -506,6 +509,14 @@ impl PostgresStore {
         local_user: &str,
         ttl_secs: u64,
     ) -> AppResult<PendingSshAuthRequest> {
+        validate_create_ssh_auth_request_input(
+            src_node_id,
+            dst_node_id,
+            ssh_user,
+            local_user,
+            ttl_secs,
+        )?;
+
         let expires_at_unix_secs = now_unix_secs()?.checked_add(ttl_secs).ok_or_else(|| {
             AppError::Bootstrap("SSH auth request expiry overflowed u64".to_string())
         })?;
@@ -515,8 +526,29 @@ impl PostgresStore {
         let pkce_verifier = random_token(48)?;
 
         let mut tx = self.pool.begin().await?;
-        ensure_node_exists(&mut tx, src_node_id, "ssh source node").await?;
-        ensure_node_exists(&mut tx, dst_node_id, "ssh destination node").await?;
+        ensure_ssh_node_usable(&mut tx, src_node_id, "ssh source node").await?;
+        ensure_ssh_node_usable(&mut tx, dst_node_id, "ssh destination node").await?;
+
+        sqlx::query(
+            r#"
+            UPDATE ssh_auth_requests
+            SET
+                expires_at = now(),
+                updated_at = now()
+            WHERE src_node_id = $1
+              AND dst_node_id = $2
+              AND ssh_user = $3
+              AND local_user = $4
+              AND status = 'pending'
+              AND expires_at > now()
+            "#,
+        )
+        .bind(u64_to_i64(src_node_id)?)
+        .bind(u64_to_i64(dst_node_id)?)
+        .bind(ssh_user)
+        .bind(local_user)
+        .execute(&mut *tx)
+        .await?;
 
         sqlx::query(
             r#"
@@ -594,10 +626,11 @@ impl PostgresStore {
                 principal_sub = $4,
                 principal_email = $5,
                 principal_name = $6,
-                resolved_at = COALESCE(resolved_at, now()),
+                resolved_at = now(),
                 updated_at = now()
             WHERE id = $1
               AND expires_at > now()
+              AND status = 'pending'
             RETURNING
                 id,
                 src_node_id,
@@ -649,7 +682,7 @@ impl PostgresStore {
                 Ok(pending)
             }
             None => Err(AppError::Unauthorized(
-                "SSH auth request is missing or expired".to_string(),
+                "SSH auth request is missing, expired, or already resolved".to_string(),
             )),
         }
     }
@@ -665,9 +698,10 @@ impl PostgresStore {
             SET
                 status = $2,
                 message = $3,
-                resolved_at = COALESCE(resolved_at, now()),
+                resolved_at = now(),
                 updated_at = now()
             WHERE id = $1
+              AND status = 'pending'
             RETURNING
                 id,
                 src_node_id,
@@ -850,10 +884,11 @@ impl PostgresStore {
 
         let existing = sqlx::query(
             r#"
-            SELECT node_id, node_key
-            FROM node_control_state
-            WHERE machine_key = $1
-            FOR UPDATE
+            SELECT c.node_id, c.node_key, n.status
+            FROM node_control_state c
+            INNER JOIN nodes n ON n.id = c.node_id
+            WHERE c.machine_key = $1
+            FOR UPDATE OF c, n
             "#,
         )
         .bind(machine_key)
@@ -862,6 +897,7 @@ impl PostgresStore {
 
         let node_id = if let Some(existing) = existing {
             let node_id = i64_to_u64(existing.get::<i64, _>("node_id"))?;
+            reject_disabled_control_node(&existing.get::<String, _>("status"))?;
             let current_node_key = existing.get::<String, _>("node_key");
             if !request.old_node_key.is_empty()
                 && request.old_node_key != current_node_key
@@ -936,7 +972,7 @@ impl PostgresStore {
             .await?;
 
             let node = load_node_tx(&mut tx, node_id).await?;
-            let route_principal = self.load_route_principal(node.principal_id).await?;
+            let route_principal = load_route_principal_tx(&mut tx, node.principal_id).await?;
             self.sync_advertised_routes_tx(
                 &mut tx,
                 &node,
@@ -1050,7 +1086,7 @@ impl PostgresStore {
             .bind(u64_to_i64(node.id)?)
             .execute(&mut *tx)
             .await?;
-            let route_principal = self.load_route_principal(node.principal_id).await?;
+            let route_principal = load_route_principal_tx(&mut tx, node.principal_id).await?;
             self.sync_advertised_routes_tx(
                 &mut tx,
                 &node,
@@ -1191,6 +1227,7 @@ impl PostgresStore {
         let existing_endpoints =
             serde_json::from_value::<Vec<String>>(existing.get::<Value, _>("endpoints"))?;
         let existing_status = existing.get::<String, _>("status");
+        reject_disabled_control_node(&existing_status)?;
         let requested_disco_key = request.disco_key.trim().to_string();
         let topology_changed = existing_disco_key != requested_disco_key
             || request
@@ -1242,7 +1279,7 @@ impl PostgresStore {
         .await?;
 
         let node = load_node_tx(&mut tx, node_id).await?;
-        let principal = self.load_route_principal(node.principal_id).await?;
+        let principal = load_route_principal_tx(&mut tx, node.principal_id).await?;
         let routes_changed = if request.hostinfo.is_some() {
             self.sync_advertised_routes_tx(
                 &mut tx,
@@ -1566,6 +1603,16 @@ fn validate_control_machine_key(machine_key: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn reject_disabled_control_node(status: &str) -> AppResult<()> {
+    if status == NodeStatus::Disabled.as_str() {
+        return Err(AppError::Unauthorized(
+            "node has been disabled by an administrator".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn validate_register_request(request: &RegisterRequest) -> AppResult<()> {
     if request.version == 0 {
         return Err(AppError::InvalidRequest(
@@ -1592,6 +1639,49 @@ fn validate_map_request(request: &MapRequest) -> AppResult<()> {
     if request.node_key.trim().is_empty() {
         return Err(AppError::InvalidRequest(
             "map request node key must not be empty".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn validate_create_ssh_auth_request_input(
+    src_node_id: u64,
+    dst_node_id: u64,
+    ssh_user: &str,
+    local_user: &str,
+    ttl_secs: u64,
+) -> AppResult<()> {
+    if src_node_id == 0 {
+        return Err(AppError::InvalidRequest(
+            "SSH auth source node id must be greater than zero".to_string(),
+        ));
+    }
+
+    if dst_node_id == 0 {
+        return Err(AppError::InvalidRequest(
+            "SSH auth destination node id must be greater than zero".to_string(),
+        ));
+    }
+
+    if ttl_secs == 0 {
+        return Err(AppError::InvalidConfig(
+            "SSH auth request TTL must be greater than zero".to_string(),
+        ));
+    }
+
+    let has_ssh_user = !ssh_user.trim().is_empty();
+    let has_local_user = !local_user.trim().is_empty();
+    if has_ssh_user != has_local_user {
+        return Err(AppError::InvalidRequest(
+            "SSH auth request must include both ssh_user and local_user or neither".to_string(),
+        ));
+    }
+
+    if ssh_user != ssh_user.trim() || local_user != local_user.trim() {
+        return Err(AppError::InvalidRequest(
+            "SSH auth request user names must not contain leading or trailing whitespace"
+                .to_string(),
         ));
     }
 
@@ -2028,6 +2118,37 @@ async fn load_node_tx(
     super::postgres::map_node_row(row)
 }
 
+async fn load_route_principal_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    principal_id: Option<u64>,
+) -> AppResult<Option<Principal>> {
+    let Some(principal_id) = principal_id else {
+        return Ok(None);
+    };
+
+    let row = sqlx::query(
+        r#"
+        SELECT
+            id,
+            provider,
+            issuer,
+            subject,
+            login_name,
+            display_name,
+            email,
+            groups,
+            EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_secs
+        FROM principals
+        WHERE id = $1
+        "#,
+    )
+    .bind(u64_to_i64(principal_id)?)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.map(super::postgres::map_principal_row).transpose()
+}
+
 fn coalesced_hostinfo(hostinfo: Option<Value>) -> Value {
     hostinfo.unwrap_or(Value::Object(Default::default()))
 }
@@ -2250,20 +2371,22 @@ fn random_token(byte_len: usize) -> AppResult<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-async fn ensure_node_exists(
+async fn ensure_ssh_node_usable(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     node_id: u64,
     resource_name: &str,
 ) -> AppResult<()> {
-    let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM nodes WHERE id = $1)")
+    let status = sqlx::query_scalar::<_, String>("SELECT status FROM nodes WHERE id = $1")
         .bind(u64_to_i64(node_id)?)
-        .fetch_one(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
-    if exists {
-        Ok(())
-    } else {
-        Err(AppError::NotFound(format!("{resource_name} {node_id}")))
+    match status {
+        Some(status) if status == NodeStatus::Disabled.as_str() => Err(AppError::Conflict(
+            format!("{resource_name} {node_id} is disabled"),
+        )),
+        Some(_) => Ok(()),
+        None => Err(AppError::NotFound(format!("{resource_name} {node_id}"))),
     }
 }
 
@@ -2626,5 +2749,45 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn disabled_control_nodes_are_rejected_before_status_touch() {
+        let error = reject_disabled_control_node(NodeStatus::Disabled.as_str())
+            .expect_err("disabled control nodes must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: node has been disabled by an administrator"
+        );
+        assert!(reject_disabled_control_node(NodeStatus::Expired.as_str()).is_ok());
+        assert!(reject_disabled_control_node(NodeStatus::Offline.as_str()).is_ok());
+    }
+
+    #[test]
+    fn ssh_auth_request_validation_rejects_invalid_ttl_and_user_binding() {
+        let ttl_error = validate_create_ssh_auth_request_input(1, 2, "", "", 0)
+            .expect_err("zero TTL must be rejected");
+        assert_eq!(
+            ttl_error.to_string(),
+            "invalid config: SSH auth request TTL must be greater than zero"
+        );
+
+        let partial_user_error = validate_create_ssh_auth_request_input(1, 2, "alice", "", 60)
+            .expect_err("partial user binding must be rejected");
+        assert_eq!(
+            partial_user_error.to_string(),
+            "invalid request: SSH auth request must include both ssh_user and local_user or neither"
+        );
+
+        let whitespace_error = validate_create_ssh_auth_request_input(1, 2, " alice", "alice", 60)
+            .expect_err("user names must already be trimmed");
+        assert_eq!(
+            whitespace_error.to_string(),
+            "invalid request: SSH auth request user names must not contain leading or trailing whitespace"
+        );
+
+        assert!(validate_create_ssh_auth_request_input(1, 2, "", "", 60).is_ok());
+        assert!(validate_create_ssh_auth_request_input(1, 2, "alice", "alice", 60).is_ok());
     }
 }

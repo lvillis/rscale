@@ -2,6 +2,7 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 
+use axum::http::Uri;
 use serde::Serialize;
 use serde_json::json;
 use time::OffsetDateTime;
@@ -297,6 +298,7 @@ impl ControlService {
                 "SSH check-mode requires OIDC to be enabled".to_string(),
             )
         })?;
+        let ssh_browser_auth_base_url = ssh_check_base_url(&self.config)?;
         let pending = self
             .store
             .create_ssh_auth_request(
@@ -307,31 +309,12 @@ impl ControlService {
                 oidc.auth_flow_ttl_secs(),
             )
             .await?;
-        let approval_url = self.ssh_browser_auth_url(&pending.auth_id)?;
+        let approval_url = format!("{ssh_browser_auth_base_url}/ssh/check/{}", pending.auth_id);
         let mut action = check_ssh_action_prompt(&check_action, &self.config, &pending.auth_id);
         action.message = format!(
             "# rscale SSH requires an additional check.\n# To authenticate, visit: {approval_url}\n# Authentication checked with rscale SSH.\n"
         );
         Ok(action)
-    }
-
-    fn ssh_browser_auth_url(&self, auth_id: &str) -> AppResult<String> {
-        let base_url = self
-            .config
-            .server
-            .public_base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| {
-                crate::error::AppError::InvalidConfig(
-                    "server.public_base_url is required for SSH check-mode".to_string(),
-                )
-            })?;
-        Ok(format!(
-            "{}/ssh/check/{auth_id}",
-            base_url.trim_end_matches('/')
-        ))
     }
 
     async fn wait_for_ssh_auth_resolution(
@@ -521,18 +504,19 @@ impl ControlService {
 
     fn advertised_derp_map(&self, advertised_derp_host: Option<&str>) -> ControlDerpMap {
         let derp_map = self.derp.effective_map();
+        let configured_host = self
+            .config
+            .server
+            .public_base_url
+            .as_deref()
+            .and_then(public_base_url_host)
+            .map(str::to_string);
         let advertised_host = advertised_derp_host
             .filter(|host| !host.trim().is_empty())
-            .map(str::trim)
-            .or_else(|| {
-                self.config
-                    .server
-                    .public_base_url
-                    .as_deref()
-                    .and_then(public_base_url_host)
-            });
+            .map(|host| host.trim().to_string())
+            .or(configured_host);
 
-        let Some(advertised_host) = advertised_host else {
+        let Some(advertised_host) = advertised_host.as_deref() else {
             return derp_map;
         };
 
@@ -1319,27 +1303,7 @@ fn control_ip_candidate_from_config(config: &ControlDialCandidateConfig) -> Cont
 }
 
 fn public_base_url_ip(url: &str) -> Option<String> {
-    let after_scheme = url.split_once("://")?.1;
-    let authority = after_scheme.split('/').next()?;
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-
-    if authority.starts_with('[') {
-        let end = authority.find(']')?;
-        return authority[1..end]
-            .parse::<IpAddr>()
-            .ok()
-            .map(|ip| ip.to_string());
-    }
-
-    let host = authority
-        .rsplit_once(':')
-        .map_or(authority, |(host, port)| match port.parse::<u16>() {
-            Ok(_) => host,
-            Err(_) => authority,
-        });
-    host.parse::<IpAddr>().ok().map(|ip| ip.to_string())
+    public_base_url_host(url).and_then(|host| host.parse::<IpAddr>().ok().map(|ip| ip.to_string()))
 }
 
 fn to_control_filter_rules(
@@ -1481,16 +1445,33 @@ fn check_ssh_action_prompt(
 }
 
 fn ssh_hold_and_delegate_url(config: &AppConfig) -> String {
+    let base_url = ssh_check_base_url(config).unwrap_or_default();
+    format!(
+        "{base_url}/machine/ssh/action/from/$SRC_NODE_ID/to/$DST_NODE_ID?ssh_user=$SSH_USER&local_user=$LOCAL_USER"
+    )
+}
+
+fn ssh_check_base_url(config: &AppConfig) -> AppResult<String> {
     let base_url = config
         .server
         .public_base_url
         .as_deref()
         .map(str::trim)
-        .map(|value| value.trim_end_matches('/'))
-        .unwrap_or_default();
-    format!(
-        "{base_url}/machine/ssh/action/from/$SRC_NODE_ID/to/$DST_NODE_ID?ssh_user=$SSH_USER&local_user=$LOCAL_USER"
-    )
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            crate::error::AppError::InvalidConfig(
+                "server.public_base_url is required for SSH check-mode".to_string(),
+            )
+        })?;
+
+    if public_base_url_host(base_url).is_none() {
+        return Err(crate::error::AppError::InvalidConfig(
+            "server.public_base_url must be an absolute http or https URL with a valid host"
+                .to_string(),
+        ));
+    }
+
+    Ok(base_url.trim_end_matches('/').to_string())
 }
 
 fn ssh_action_binding(
@@ -1615,12 +1596,12 @@ fn default_domain(config: &AppConfig, dns: &DnsConfig) -> String {
     dns.base_domain
         .clone()
         .or_else(|| {
-            config.server.public_base_url.as_deref().and_then(|url| {
-                url.split("://")
-                    .nth(1)
-                    .and_then(|rest| rest.split('/').next())
-                    .map(str::to_string)
-            })
+            config
+                .server
+                .public_base_url
+                .as_deref()
+                .and_then(public_base_url_host)
+                .map(str::to_string)
         })
         .unwrap_or_else(|| "rscale.local".to_string())
 }
@@ -1753,27 +1734,63 @@ fn now_unix_secs() -> AppResult<u64> {
     })
 }
 
-fn public_base_url_host(value: &str) -> Option<&str> {
+fn public_base_url_authority(value: &str) -> Option<&str> {
+    let value = value.trim();
+    let uri = value.parse::<Uri>().ok()?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
+        return None;
+    }
+
     let (_, remainder) = value.split_once("://")?;
-    let authority = remainder.split('/').next()?.trim();
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .map(str::trim)
+        .filter(|authority| !authority.is_empty())?;
+    authority_host(authority)?;
+    Some(authority)
+}
+
+fn public_base_url_host(value: &str) -> Option<&str> {
+    let authority = public_base_url_authority(value)?;
     authority_host(authority)
 }
 
 fn authority_host(value: &str) -> Option<&str> {
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.contains('@') {
         return None;
     }
 
     if let Some(stripped) = value.strip_prefix('[') {
-        return stripped.split_once(']').map(|(host, _)| host);
+        let (host, after_host) = stripped.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+
+        return match after_host.strip_prefix(':') {
+            Some(port) if !port.is_empty() && port.parse::<u16>().is_ok() => Some(host),
+            Some(_) => None,
+            None if after_host.is_empty() => Some(host),
+            None => None,
+        };
+    }
+
+    if value.contains('[') || value.contains(']') {
+        return None;
     }
 
     if let Some((host, port)) = value.rsplit_once(':')
+        && !host.is_empty()
         && !host.contains(':')
+        && !port.is_empty()
         && port.parse::<u16>().is_ok()
     {
         return Some(host);
+    }
+
+    if value.contains(':') {
+        return None;
     }
 
     Some(value)
@@ -1846,6 +1863,71 @@ mod tests {
             node_key_signature: None,
             tailnet: String::new(),
         }
+    }
+
+    #[test]
+    fn ssh_check_base_url_requires_configured_public_base_url() {
+        let mut config = AppConfig::default();
+
+        let error = ssh_check_base_url(&config)
+            .expect_err("SSH check-mode must require a configured public base URL");
+        assert_eq!(
+            error.to_string(),
+            "invalid config: server.public_base_url is required for SSH check-mode"
+        );
+
+        config.server.public_base_url = Some(" https://control.example.com/ ".to_string());
+        assert_eq!(
+            ssh_check_base_url(&config).expect("valid base URL should normalize"),
+            "https://control.example.com"
+        );
+    }
+
+    #[test]
+    fn ssh_check_base_url_rejects_invalid_public_base_url() {
+        let mut config = AppConfig::default();
+        for value in [
+            "/relative",
+            "ftp://control.example.com",
+            "https://user@control.example.com",
+            "https://[::1].evil",
+            "https://control.example.com:invalid",
+        ] {
+            config.server.public_base_url = Some(value.to_string());
+            let error = ssh_check_base_url(&config)
+                .expect_err("SSH check-mode base URL must be an absolute http URL");
+            assert_eq!(
+                error.to_string(),
+                "invalid config: server.public_base_url must be an absolute http or https URL with a valid host"
+            );
+        }
+    }
+
+    #[test]
+    fn public_base_url_host_strictly_parses_authorities() {
+        assert_eq!(
+            public_base_url_host("https://control.example.com:8443/path?region=1"),
+            Some("control.example.com")
+        );
+        assert_eq!(
+            public_base_url_host("https://[2001:db8::1]:8443/derp"),
+            Some("2001:db8::1")
+        );
+        assert_eq!(
+            public_base_url_host("https://control.example.com?region=1"),
+            Some("control.example.com")
+        );
+
+        assert_eq!(
+            public_base_url_host("https://user@control.example.com"),
+            None
+        );
+        assert_eq!(public_base_url_host("https://[::1].evil"), None);
+        assert_eq!(
+            public_base_url_host("https://control.example.com:invalid"),
+            None
+        );
+        assert_eq!(public_base_url_host("/relative"), None);
     }
 
     #[test]
@@ -2194,6 +2276,29 @@ mod tests {
         assert_eq!(plan.candidates.len(), 1);
         assert_eq!(plan.candidates[0].ip, "203.0.113.10");
         Ok(())
+    }
+
+    #[test]
+    fn public_base_url_ip_rejects_non_ip_or_invalid_authority() {
+        assert_eq!(
+            public_base_url_ip("https://[2001:db8::10]:8443/derp"),
+            Some("2001:db8::10".to_string())
+        );
+        assert_eq!(public_base_url_ip("https://control.example.com"), None);
+        assert_eq!(public_base_url_ip("https://user@203.0.113.10"), None);
+        assert_eq!(public_base_url_ip("https://[::1].evil"), None);
+    }
+
+    #[test]
+    fn default_domain_uses_public_base_url_host_only() {
+        let mut config = AppConfig::default();
+        config.server.public_base_url =
+            Some("https://control.example.com:8443/path?region=1".to_string());
+
+        assert_eq!(
+            default_domain(&config, &DnsConfig::default()),
+            "control.example.com"
+        );
     }
 
     #[test]

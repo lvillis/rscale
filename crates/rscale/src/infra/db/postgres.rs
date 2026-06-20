@@ -13,13 +13,13 @@ use uuid::Uuid;
 use crate::config::{DatabaseConfig, NetworkConfig};
 use crate::domain::{
     AclPolicy, AuditActor, AuditEvent, AuditEventKind, AuthKey, AuthKeyState, BackupAuthKey,
-    BackupRestoreResult, BackupSnapshot, DnsConfig, IssuedAuthKey, Node, NodeHeartbeat, NodeMap,
-    NodeRegistration, NodeStatus, NodeTagSource, Principal, Route, RouteApproval,
-    normalize_acl_tags, validate_route_prefix,
+    BackupControlNodeState, BackupRestoreResult, BackupSnapshot, DnsConfig, IssuedAuthKey, Node,
+    NodeHeartbeat, NodeMap, NodeRegistration, NodeStatus, NodeTagSource, Principal, Route,
+    RouteApproval, normalize_acl_tags, validate_route_prefix,
 };
 use crate::error::{AppError, AppResult};
 
-const BACKUP_FORMAT_VERSION: u32 = 3;
+const BACKUP_FORMAT_VERSION: u32 = 4;
 const CONTROL_PLANE_STATE_ID: &str = "global";
 const CONTROL_UPDATE_CHANNEL: &str = "rscale_control_updates";
 const CONTROL_LISTENER_RETRY_INTERVAL_SECS: u64 = 1;
@@ -430,12 +430,6 @@ impl PostgresStore {
 
         let mut tx = self.pool.begin().await?;
         let auth_key = self.authenticate_auth_key(&mut tx, &input.auth_key).await?;
-        if !input.tags.is_empty() {
-            return Err(AppError::InvalidRequest(
-                "registration tags must be defined on the auth key, not supplied by the caller"
-                    .to_string(),
-            ));
-        }
         let (ipv4, ipv6) = self.allocate_node_addresses(&mut tx, None, None).await?;
         let session_token = generate_node_session_secret();
         let session_expires_at_unix_secs =
@@ -517,76 +511,22 @@ impl PostgresStore {
         node_id: u64,
         session_token: &str,
     ) -> AppResult<NodeHeartbeat> {
-        self.authenticate_node_session(node_id, session_token)
+        let (node, observed_at) = self
+            .touch_authenticated_node_session(node_id, session_token, false)
             .await?;
-
-        let observed_at = now_unix_secs()?;
-        let session_expires_at_unix_secs =
-            next_session_expiry_unix_secs(self.network.node_session_ttl_secs)?;
-        let row = sqlx::query(
-            r#"
-            UPDATE nodes
-            SET
-                last_seen_unix_secs = $2,
-                status = $3,
-                session_expires_at = to_timestamp($4),
-                updated_at = now()
-            WHERE id = $1
-            RETURNING
-                id,
-                stable_id,
-                name,
-                hostname,
-                auth_key_id,
-                principal_id,
-                ipv4,
-                ipv6,
-                status,
-                tags,
-                tag_source,
-                last_seen_unix_secs
-            "#,
-        )
-        .bind(u64_to_i64(node_id)?)
-        .bind(u64_to_i64(observed_at)?)
-        .bind(NodeStatus::Online.as_str())
-        .bind(session_expires_at_unix_secs as f64)
-        .fetch_one(&self.pool)
-        .await?;
 
         self.notify_control_change().await;
 
         Ok(NodeHeartbeat {
-            node: map_node_row(row)?,
+            node,
             observed_at_unix_secs: observed_at,
         })
     }
 
     pub async fn sync_node_map(&self, node_id: u64, session_token: &str) -> AppResult<NodeMap> {
-        self.authenticate_node_session(node_id, session_token)
+        let _ = self
+            .touch_authenticated_node_session(node_id, session_token, true)
             .await?;
-
-        let observed_at = now_unix_secs()?;
-        let session_expires_at_unix_secs =
-            next_session_expiry_unix_secs(self.network.node_session_ttl_secs)?;
-        sqlx::query(
-            r#"
-            UPDATE nodes
-            SET
-                last_seen_unix_secs = $2,
-                status = $3,
-                last_sync_at = now(),
-                session_expires_at = to_timestamp($4),
-                updated_at = now()
-            WHERE id = $1
-            "#,
-        )
-        .bind(u64_to_i64(node_id)?)
-        .bind(u64_to_i64(observed_at)?)
-        .bind(NodeStatus::Online.as_str())
-        .bind(session_expires_at_unix_secs as f64)
-        .execute(&self.pool)
-        .await?;
 
         self.notify_control_change().await;
 
@@ -751,10 +691,49 @@ impl PostgresStore {
     }
 
     pub async fn disable_node(&self, node_id: u64, actor: &AuditActor) -> AppResult<Node> {
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                stable_id,
+                name,
+                hostname,
+                auth_key_id,
+                principal_id,
+                ipv4,
+                ipv6,
+                status,
+                tags,
+                tag_source,
+                last_seen_unix_secs
+            FROM nodes
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(u64_to_i64(node_id)?)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let current = match row {
+            Some(row) => map_node_row(row)?,
+            None => return Err(AppError::NotFound(format!("node {node_id}"))),
+        };
+
+        if current.status == NodeStatus::Disabled {
+            tx.commit().await?;
+            return Ok(current);
+        }
+
         let row = sqlx::query(
             r#"
             UPDATE nodes
-            SET status = $2, updated_at = now()
+            SET
+                status = $2,
+                session_secret_hash = NULL,
+                session_expires_at = NULL,
+                updated_at = now()
             WHERE id = $1
             RETURNING
                 id,
@@ -773,20 +752,19 @@ impl PostgresStore {
         )
         .bind(u64_to_i64(node_id)?)
         .bind(NodeStatus::Disabled.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
-        let node = match row {
-            Some(row) => map_node_row(row)?,
-            None => return Err(AppError::NotFound(format!("node {node_id}"))),
-        };
+        let node = map_node_row(row)?;
 
-        self.record_audit_event(
+        self.record_audit_event_tx(
+            &mut tx,
             AuditEventKind::NodeDisabled,
             actor,
             &format!("node/{}", node.id),
         )
         .await?;
+        tx.commit().await?;
         self.notify_control_change().await;
 
         Ok(node)
@@ -925,7 +903,7 @@ impl PostgresStore {
         input: &CreateAuthKeyInput,
         actor: &AuditActor,
     ) -> AppResult<IssuedAuthKey> {
-        validate_create_auth_key_input(input)?;
+        validate_create_auth_key_input(input, now_unix_secs()?)?;
 
         let key = generate_auth_key_secret();
         let row = sqlx::query(
@@ -989,11 +967,45 @@ impl PostgresStore {
             ));
         }
 
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query(
+            r#"
+            SELECT
+                id,
+                description,
+                tags,
+                reusable,
+                ephemeral,
+                state,
+                usage_count,
+                EXTRACT(EPOCH FROM expires_at)::bigint AS expires_at_unix_secs,
+                EXTRACT(EPOCH FROM created_at)::bigint AS created_at_unix_secs,
+                EXTRACT(EPOCH FROM last_used_at)::bigint AS last_used_at_unix_secs,
+                EXTRACT(EPOCH FROM revoked_at)::bigint AS revoked_at_unix_secs
+            FROM auth_keys
+            WHERE id = $1
+            FOR UPDATE
+            "#,
+        )
+        .bind(auth_key_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let current = match row {
+            Some(row) => map_auth_key_row(row)?,
+            None => return Err(AppError::NotFound(format!("auth key {auth_key_id}"))),
+        };
+
+        if current.state == AuthKeyState::Revoked {
+            tx.commit().await?;
+            return Ok(current);
+        }
+
         let row = sqlx::query(
             r#"
             UPDATE auth_keys
-            SET state = $2, revoked_at = now()
-            WHERE id = $1 AND state <> $2
+            SET state = $2, revoked_at = COALESCE(revoked_at, now())
+            WHERE id = $1
             RETURNING
                 id,
                 description,
@@ -1010,20 +1022,19 @@ impl PostgresStore {
         )
         .bind(auth_key_id)
         .bind(AuthKeyState::Revoked.as_str())
-        .fetch_optional(&self.pool)
+        .fetch_one(&mut *tx)
         .await?;
 
-        let auth_key = match row {
-            Some(row) => map_auth_key_row(row)?,
-            None => return Err(AppError::NotFound(format!("auth key {auth_key_id}"))),
-        };
+        let auth_key = map_auth_key_row(row)?;
 
-        self.record_audit_event(
+        self.record_audit_event_tx(
+            &mut tx,
             AuditEventKind::AuthKeyRevoked,
             actor,
             &format!("auth_key/{}", auth_key.id),
         )
         .await?;
+        tx.commit().await?;
 
         Ok(auth_key)
     }
@@ -1144,6 +1155,7 @@ impl PostgresStore {
             generated_at_unix_secs: now_unix_secs()?,
             principals: self.list_principals().await?,
             nodes: self.list_nodes().await?,
+            control_nodes: self.list_backup_control_nodes().await?,
             auth_keys: self.list_backup_auth_keys().await?,
             policy: self.load_policy().await?,
             dns: self.load_dns_config().await?,
@@ -1164,16 +1176,12 @@ impl PostgresStore {
             )));
         }
 
-        snapshot.policy.validate()?;
-        snapshot.dns.validate()?;
-        for route in &snapshot.routes {
-            route.validate()?;
-        }
+        validate_backup_snapshot(snapshot)?;
 
         let mut tx = self.pool.begin().await?;
 
         sqlx::query(
-            "TRUNCATE TABLE audit_events, routes, node_control_state, oidc_auth_requests, nodes, principals, auth_keys RESTART IDENTITY",
+            "TRUNCATE TABLE audit_events, routes, ssh_check_approvals, ssh_auth_requests, node_control_state, oidc_auth_requests, nodes, principals, auth_keys RESTART IDENTITY",
         )
             .execute(&mut *tx)
             .await?;
@@ -1282,12 +1290,6 @@ impl PostgresStore {
 
         let mut max_node_id = 0_u64;
         for node in &snapshot.nodes {
-            if node.name.trim().is_empty() || node.hostname.trim().is_empty() {
-                return Err(AppError::InvalidRequest(
-                    "backup contains node entries with empty name or hostname".to_string(),
-                ));
-            }
-
             sqlx::query(
                 r#"
                 INSERT INTO nodes (
@@ -1327,6 +1329,64 @@ impl PostgresStore {
         }
 
         reset_nodes_sequence(&mut tx, max_node_id, !snapshot.nodes.is_empty()).await?;
+
+        for control_node in &snapshot.control_nodes {
+            sqlx::query(
+                r#"
+                INSERT INTO node_control_state (
+                    node_id,
+                    machine_key,
+                    node_key,
+                    disco_key,
+                    hostinfo,
+                    endpoints,
+                    key_expiry,
+                    map_request_version,
+                    map_session_handle,
+                    map_session_seq,
+                    last_control_seen_at,
+                    last_map_poll_at
+                )
+                VALUES (
+                    $1,
+                    $2,
+                    $3,
+                    $4,
+                    $5,
+                    $6,
+                    to_timestamp($7),
+                    $8,
+                    $9,
+                    $10,
+                    to_timestamp($11),
+                    to_timestamp($12)
+                )
+                "#,
+            )
+            .bind(u64_to_i64(control_node.node_id)?)
+            .bind(&control_node.machine_key)
+            .bind(&control_node.node_key)
+            .bind(control_node.disco_key.as_deref())
+            .bind(&control_node.hostinfo)
+            .bind(serde_json::to_value(&control_node.endpoints)?)
+            .bind(control_node.key_expiry_unix_secs.map(|value| value as f64))
+            .bind(i64::from(control_node.map_request_version))
+            .bind(control_node.map_session_handle.as_deref())
+            .bind(control_node.map_session_seq)
+            .bind(
+                control_node
+                    .last_control_seen_at_unix_secs
+                    .map(|value| value as f64),
+            )
+            .bind(
+                control_node
+                    .last_map_poll_at_unix_secs
+                    .map(|value| value as f64),
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(map_database_write_error)?;
+        }
 
         let mut max_route_id = 0_u64;
         for route in &snapshot.routes {
@@ -1637,14 +1697,31 @@ impl PostgresStore {
         }
     }
 
-    async fn authenticate_node_session(
+    async fn touch_authenticated_node_session(
         &self,
         node_id: u64,
         session_token: &str,
-    ) -> AppResult<Node> {
+        mark_synced: bool,
+    ) -> AppResult<(Node, u64)> {
+        let observed_at = now_unix_secs()?;
+        let session_expires_at_unix_secs =
+            next_session_expiry_unix_secs(self.network.node_session_ttl_secs)?;
         let row = sqlx::query(
             r#"
-            SELECT
+            UPDATE nodes
+            SET
+                last_seen_unix_secs = $2,
+                status = $3,
+                last_sync_at = CASE WHEN $4 THEN now() ELSE last_sync_at END,
+                session_expires_at = to_timestamp($5),
+                updated_at = now()
+            WHERE
+                id = $1
+                AND session_secret_hash = $6
+                AND status <> 'disabled'
+                AND session_expires_at IS NOT NULL
+                AND session_expires_at > now()
+            RETURNING
                 id,
                 stable_id,
                 name,
@@ -1657,22 +1734,19 @@ impl PostgresStore {
                 tags,
                 tag_source,
                 last_seen_unix_secs
-            FROM nodes
-            WHERE
-                id = $1
-                AND session_secret_hash = $2
-                AND status <> 'disabled'
-                AND session_expires_at IS NOT NULL
-                AND session_expires_at > now()
             "#,
         )
         .bind(u64_to_i64(node_id)?)
+        .bind(u64_to_i64(observed_at)?)
+        .bind(NodeStatus::Online.as_str())
+        .bind(mark_synced)
+        .bind(session_expires_at_unix_secs as f64)
         .bind(hash_secret(session_token))
         .fetch_optional(&self.pool)
         .await?;
 
         match row {
-            Some(row) => map_node_row(row),
+            Some(row) => Ok((map_node_row(row)?, observed_at)),
             None => Err(AppError::Unauthorized(
                 "invalid or expired node session token".to_string(),
             )),
@@ -1718,6 +1792,32 @@ impl PostgresStore {
         .await?;
 
         rows.into_iter().map(map_backup_auth_key_row).collect()
+    }
+
+    async fn list_backup_control_nodes(&self) -> AppResult<Vec<BackupControlNodeState>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                node_id,
+                machine_key,
+                node_key,
+                disco_key,
+                hostinfo,
+                endpoints,
+                EXTRACT(EPOCH FROM key_expiry)::bigint AS key_expiry_unix_secs,
+                map_request_version,
+                map_session_handle,
+                map_session_seq,
+                EXTRACT(EPOCH FROM last_control_seen_at)::bigint AS last_control_seen_at_unix_secs,
+                EXTRACT(EPOCH FROM last_map_poll_at)::bigint AS last_map_poll_at_unix_secs
+            FROM node_control_state
+            ORDER BY node_id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(map_backup_control_node_row).collect()
     }
 
     pub(super) async fn record_audit_event(
@@ -1935,7 +2035,7 @@ fn validate_update_node_input(input: &UpdateNodeInput) -> AppResult<()> {
     Ok(())
 }
 
-fn validate_create_auth_key_input(input: &CreateAuthKeyInput) -> AppResult<()> {
+fn validate_create_auth_key_input(input: &CreateAuthKeyInput, now_unix_secs: u64) -> AppResult<()> {
     if input
         .description
         .as_deref()
@@ -1947,6 +2047,14 @@ fn validate_create_auth_key_input(input: &CreateAuthKeyInput) -> AppResult<()> {
     }
 
     normalize_acl_tags(&input.tags)?;
+    if let Some(expires_at_unix_secs) = input.expires_at_unix_secs
+        && expires_at_unix_secs <= now_unix_secs
+    {
+        return Err(AppError::InvalidRequest(
+            "auth key expiration must be in the future".to_string(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -1970,6 +2078,13 @@ fn validate_register_node_input(input: &RegisterNodeInput) -> AppResult<()> {
     {
         return Err(AppError::InvalidRequest(
             "node name must not be empty when provided".to_string(),
+        ));
+    }
+
+    if !input.tags.is_empty() {
+        return Err(AppError::InvalidRequest(
+            "registration tags must be defined on the auth key, not supplied by the caller"
+                .to_string(),
         ));
     }
 
@@ -2105,6 +2220,13 @@ pub(super) fn map_route_row(row: sqlx::postgres::PgRow) -> AppResult<Route> {
 fn map_auth_key_row(row: sqlx::postgres::PgRow) -> AppResult<AuthKey> {
     let state = row.get::<String, _>("state");
     let tags = serde_json::from_value::<Vec<String>>(row.get::<serde_json::Value, _>("tags"))?;
+    let expires_at_unix_secs = row
+        .get::<Option<i64>, _>("expires_at_unix_secs")
+        .map(i64_to_u64)
+        .transpose()?;
+    let state = AuthKeyState::parse(&state).ok_or_else(|| {
+        AppError::Bootstrap(format!("unsupported auth key state in database: {state}"))
+    })?;
 
     Ok(AuthKey {
         id: row.get("id"),
@@ -2112,10 +2234,7 @@ fn map_auth_key_row(row: sqlx::postgres::PgRow) -> AppResult<AuthKey> {
         tags,
         reusable: row.get("reusable"),
         ephemeral: row.get("ephemeral"),
-        expires_at_unix_secs: row
-            .get::<Option<i64>, _>("expires_at_unix_secs")
-            .map(i64_to_u64)
-            .transpose()?,
+        expires_at_unix_secs,
         created_at_unix_secs: i64_to_u64(row.get::<i64, _>("created_at_unix_secs"))?,
         last_used_at_unix_secs: row
             .get::<Option<i64>, _>("last_used_at_unix_secs")
@@ -2126,10 +2245,22 @@ fn map_auth_key_row(row: sqlx::postgres::PgRow) -> AppResult<AuthKey> {
             .map(i64_to_u64)
             .transpose()?,
         usage_count: i64_to_u64(row.get::<i64, _>("usage_count"))?,
-        state: AuthKeyState::parse(&state).ok_or_else(|| {
-            AppError::Bootstrap(format!("unsupported auth key state in database: {state}"))
-        })?,
+        state: effective_auth_key_state(state, expires_at_unix_secs, now_unix_secs()?),
     })
+}
+
+fn effective_auth_key_state(
+    state: AuthKeyState,
+    expires_at_unix_secs: Option<u64>,
+    now_unix_secs: u64,
+) -> AuthKeyState {
+    if state == AuthKeyState::Active
+        && expires_at_unix_secs.is_some_and(|expires_at| expires_at <= now_unix_secs)
+    {
+        AuthKeyState::Expired
+    } else {
+        state
+    }
 }
 
 fn map_backup_auth_key_row(row: sqlx::postgres::PgRow) -> AppResult<BackupAuthKey> {
@@ -2162,6 +2293,32 @@ fn map_backup_auth_key_row(row: sqlx::postgres::PgRow) -> AppResult<BackupAuthKe
             })?,
         },
         secret_hash: row.get("secret_hash"),
+    })
+}
+
+fn map_backup_control_node_row(row: sqlx::postgres::PgRow) -> AppResult<BackupControlNodeState> {
+    Ok(BackupControlNodeState {
+        node_id: i64_to_u64(row.get::<i64, _>("node_id"))?,
+        machine_key: row.get("machine_key"),
+        node_key: row.get("node_key"),
+        disco_key: row.get("disco_key"),
+        hostinfo: row.get("hostinfo"),
+        endpoints: serde_json::from_value(row.get::<serde_json::Value, _>("endpoints"))?,
+        key_expiry_unix_secs: row
+            .get::<Option<i64>, _>("key_expiry_unix_secs")
+            .map(i64_to_u64)
+            .transpose()?,
+        map_request_version: i64_to_u32(row.get::<i64, _>("map_request_version"))?,
+        map_session_handle: row.get("map_session_handle"),
+        map_session_seq: row.get("map_session_seq"),
+        last_control_seen_at_unix_secs: row
+            .get::<Option<i64>, _>("last_control_seen_at_unix_secs")
+            .map(i64_to_u64)
+            .transpose()?,
+        last_map_poll_at_unix_secs: row
+            .get::<Option<i64>, _>("last_map_poll_at_unix_secs")
+            .map(i64_to_u64)
+            .transpose()?,
     })
 }
 
@@ -2437,6 +2594,204 @@ fn u64_to_i64(value: u64) -> AppResult<i64> {
     })
 }
 
+fn i64_to_u32(value: i64) -> AppResult<u32> {
+    value.try_into().map_err(|_| {
+        AppError::Bootstrap(format!(
+            "database value {value} cannot be represented as u32"
+        ))
+    })
+}
+
+fn validate_backup_control_nodes(
+    nodes: &[Node],
+    control_nodes: &[BackupControlNodeState],
+) -> AppResult<()> {
+    let node_ids = nodes
+        .iter()
+        .map(|node| node.id)
+        .collect::<std::collections::BTreeSet<_>>();
+
+    for control_node in control_nodes {
+        if control_node.node_id == 0 || !node_ids.contains(&control_node.node_id) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup control node references missing node {}",
+                control_node.node_id
+            )));
+        }
+
+        if control_node.machine_key.trim().is_empty() {
+            return Err(AppError::InvalidRequest(
+                "backup control node contains an empty machine_key".to_string(),
+            ));
+        }
+
+        if control_node.node_key.trim().is_empty() {
+            return Err(AppError::InvalidRequest(
+                "backup control node contains an empty node_key".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_backup_snapshot(snapshot: &BackupSnapshot) -> AppResult<()> {
+    snapshot.policy.validate()?;
+    snapshot.dns.validate()?;
+
+    let mut auth_key_ids = std::collections::BTreeSet::new();
+    for backup_auth_key in &snapshot.auth_keys {
+        if backup_auth_key.auth_key.id.trim().is_empty() {
+            return Err(AppError::InvalidRequest(
+                "backup contains auth key entries with empty id".to_string(),
+            ));
+        }
+        if !auth_key_ids.insert(backup_auth_key.auth_key.id.as_str()) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate auth key {}",
+                backup_auth_key.auth_key.id
+            )));
+        }
+        if backup_auth_key.secret_hash.trim().is_empty() {
+            return Err(AppError::InvalidRequest(format!(
+                "backup auth key {} contains an empty secret_hash",
+                backup_auth_key.auth_key.id
+            )));
+        }
+        normalize_acl_tags(&backup_auth_key.auth_key.tags)?;
+    }
+
+    let mut principal_ids = std::collections::BTreeSet::new();
+    for principal in &snapshot.principals {
+        if principal.id == 0 {
+            return Err(AppError::InvalidRequest(
+                "backup contains principal entries with id 0".to_string(),
+            ));
+        }
+        if !principal_ids.insert(principal.id) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate principal {}",
+                principal.id
+            )));
+        }
+        if principal.provider.trim().is_empty()
+            || principal.login_name.trim().is_empty()
+            || principal.display_name.trim().is_empty()
+        {
+            return Err(AppError::InvalidRequest(format!(
+                "backup principal {} contains empty identity fields",
+                principal.id
+            )));
+        }
+    }
+
+    let mut node_ids = std::collections::BTreeSet::new();
+    let mut stable_ids = std::collections::BTreeSet::new();
+    let mut names = std::collections::BTreeSet::new();
+    for node in &snapshot.nodes {
+        if node.id == 0 {
+            return Err(AppError::InvalidRequest(
+                "backup contains node entries with id 0".to_string(),
+            ));
+        }
+        if !node_ids.insert(node.id) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate node {}",
+                node.id
+            )));
+        }
+        if node.stable_id.trim().is_empty()
+            || node.name.trim().is_empty()
+            || node.hostname.trim().is_empty()
+        {
+            return Err(AppError::InvalidRequest(format!(
+                "backup node {} contains empty identity fields",
+                node.id
+            )));
+        }
+        if !stable_ids.insert(node.stable_id.as_str()) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate node stable_id {}",
+                node.stable_id
+            )));
+        }
+        if !names.insert(node.name.as_str()) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate node name {}",
+                node.name
+            )));
+        }
+        if let Some(auth_key_id) = node.auth_key_id.as_deref()
+            && !auth_key_ids.contains(auth_key_id)
+        {
+            return Err(AppError::InvalidRequest(format!(
+                "backup node {} references missing auth key {}",
+                node.id, auth_key_id
+            )));
+        }
+        if let Some(principal_id) = node.principal_id
+            && !principal_ids.contains(&principal_id)
+        {
+            return Err(AppError::InvalidRequest(format!(
+                "backup node {} references missing principal {}",
+                node.id, principal_id
+            )));
+        }
+        if let Some(ipv4) = node.ipv4.as_deref() {
+            parse_ipv4(ipv4)?;
+        }
+        if let Some(ipv6) = node.ipv6.as_deref() {
+            parse_ipv6(ipv6)?;
+        }
+        normalize_acl_tags(&node.tags)?;
+    }
+
+    let mut route_ids = std::collections::BTreeSet::new();
+    for route in &snapshot.routes {
+        route.validate()?;
+        if route.id == 0 {
+            return Err(AppError::InvalidRequest(
+                "backup contains route entries with id 0".to_string(),
+            ));
+        }
+        if !route_ids.insert(route.id) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate route {}",
+                route.id
+            )));
+        }
+        if !node_ids.contains(&route.node_id) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup route {} references missing node {}",
+                route.id, route.node_id
+            )));
+        }
+    }
+
+    validate_backup_control_nodes(&snapshot.nodes, &snapshot.control_nodes)?;
+
+    let mut audit_event_ids = std::collections::BTreeSet::new();
+    for event in &snapshot.audit_events {
+        if event.id.trim().is_empty()
+            || event.actor.subject.trim().is_empty()
+            || event.actor.mechanism.trim().is_empty()
+            || event.target.trim().is_empty()
+        {
+            return Err(AppError::InvalidRequest(
+                "backup contains audit event entries with empty fields".to_string(),
+            ));
+        }
+        if !audit_event_ids.insert(event.id.as_str()) {
+            return Err(AppError::InvalidRequest(format!(
+                "backup contains duplicate audit event {}",
+                event.id
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -2497,6 +2852,44 @@ mod tests {
             approval,
             approved_by_policy,
             is_exit_node,
+        }
+    }
+
+    fn backup_auth_key(id: &str) -> BackupAuthKey {
+        BackupAuthKey {
+            auth_key: AuthKey {
+                id: id.to_string(),
+                description: None,
+                tags: Vec::new(),
+                reusable: true,
+                ephemeral: false,
+                expires_at_unix_secs: None,
+                created_at_unix_secs: 1,
+                last_used_at_unix_secs: None,
+                revoked_at_unix_secs: None,
+                usage_count: 0,
+                state: AuthKeyState::Active,
+            },
+            secret_hash: format!("hash-{id}"),
+        }
+    }
+
+    fn backup_snapshot() -> BackupSnapshot {
+        BackupSnapshot {
+            format_version: BACKUP_FORMAT_VERSION,
+            generated_at_unix_secs: 1,
+            principals: vec![principal(10, "alice@example.com")],
+            nodes: vec![Node {
+                auth_key_id: Some("auth-key-1".to_string()),
+                principal_id: Some(10),
+                ..node(1, Some(10), &[])
+            }],
+            control_nodes: Vec::new(),
+            auth_keys: vec![backup_auth_key("auth-key-1")],
+            policy: AclPolicy::default(),
+            dns: DnsConfig::default(),
+            routes: Vec::new(),
+            audit_events: Vec::new(),
         }
     }
 
@@ -2618,6 +3011,73 @@ mod tests {
     }
 
     #[test]
+    fn create_auth_key_rejects_non_future_expiration() {
+        let input = CreateAuthKeyInput {
+            description: Some("ci".to_string()),
+            tags: Vec::new(),
+            reusable: false,
+            ephemeral: false,
+            expires_at_unix_secs: Some(10_000),
+        };
+
+        let error = validate_create_auth_key_input(&input, 10_000)
+            .expect_err("auth keys must not be created with expired credentials");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: auth key expiration must be in the future"
+        );
+    }
+
+    #[test]
+    fn create_auth_key_accepts_future_expiration() {
+        let input = CreateAuthKeyInput {
+            description: Some("ci".to_string()),
+            tags: Vec::new(),
+            reusable: true,
+            ephemeral: false,
+            expires_at_unix_secs: Some(10_001),
+        };
+
+        validate_create_auth_key_input(&input, 10_000)
+            .expect("future auth key expiration should be accepted");
+    }
+
+    #[test]
+    fn register_node_input_rejects_caller_supplied_tags() {
+        let input = RegisterNodeInput {
+            auth_key: "tskey-auth-test".to_string(),
+            name: None,
+            hostname: "node-a".to_string(),
+            tags: vec!["tag:prod".to_string()],
+        };
+
+        let error = validate_register_node_input(&input)
+            .expect_err("registration tags must be owned by the auth key");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: registration tags must be defined on the auth key, not supplied by the caller"
+        );
+    }
+
+    #[test]
+    fn effective_auth_key_state_marks_active_expired_keys() {
+        assert_eq!(
+            effective_auth_key_state(AuthKeyState::Active, Some(10_000), 10_000),
+            AuthKeyState::Expired
+        );
+        assert_eq!(
+            effective_auth_key_state(AuthKeyState::Active, Some(10_001), 10_000),
+            AuthKeyState::Active
+        );
+        assert_eq!(
+            effective_auth_key_state(AuthKeyState::Revoked, Some(9_999), 10_000),
+            AuthKeyState::Revoked
+        );
+    }
+
+    #[test]
     fn route_policy_reconciliation_auto_approves_pending_routes() -> TestResult {
         let policy = AclPolicy {
             groups: vec![crate::domain::PolicySubject {
@@ -2722,5 +3182,108 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn backup_snapshot_rejects_nodes_that_reference_missing_auth_keys() {
+        let mut snapshot = backup_snapshot();
+        snapshot.nodes[0].auth_key_id = Some("missing".to_string());
+
+        let error = validate_backup_snapshot(&snapshot)
+            .expect_err("missing auth key references must be rejected before restore");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: backup node 1 references missing auth key missing"
+        );
+    }
+
+    #[test]
+    fn backup_snapshot_rejects_routes_that_reference_missing_nodes() {
+        let mut snapshot = backup_snapshot();
+        snapshot.routes = vec![route(
+            100,
+            99,
+            "10.0.0.0/24",
+            RouteApproval::Pending,
+            false,
+            false,
+        )];
+
+        let error = validate_backup_snapshot(&snapshot)
+            .expect_err("missing route node references must be rejected before restore");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: backup route 100 references missing node 99"
+        );
+    }
+
+    #[test]
+    fn backup_snapshot_rejects_empty_auth_key_secret_hashes() {
+        let mut snapshot = backup_snapshot();
+        snapshot.auth_keys[0].secret_hash = " ".to_string();
+
+        let error = validate_backup_snapshot(&snapshot)
+            .expect_err("empty auth key secret hashes must be rejected before restore");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: backup auth key auth-key-1 contains an empty secret_hash"
+        );
+    }
+
+    #[test]
+    fn backup_control_nodes_must_reference_restored_nodes() {
+        let nodes = vec![node(1, None, &[])];
+        let control_nodes = vec![BackupControlNodeState {
+            node_id: 2,
+            machine_key: "mkey:test-machine".to_string(),
+            node_key: "nodekey:test-node".to_string(),
+            disco_key: None,
+            hostinfo: serde_json::json!({}),
+            endpoints: Vec::new(),
+            key_expiry_unix_secs: None,
+            map_request_version: 1,
+            map_session_handle: None,
+            map_session_seq: 0,
+            last_control_seen_at_unix_secs: None,
+            last_map_poll_at_unix_secs: None,
+        }];
+
+        let error = validate_backup_control_nodes(&nodes, &control_nodes)
+            .expect_err("missing node references must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: backup control node references missing node 2"
+        );
+    }
+
+    #[test]
+    fn backup_control_nodes_require_non_empty_keys() {
+        let nodes = vec![node(1, None, &[])];
+        let control_nodes = vec![BackupControlNodeState {
+            node_id: 1,
+            machine_key: " ".to_string(),
+            node_key: "nodekey:test-node".to_string(),
+            disco_key: None,
+            hostinfo: serde_json::json!({}),
+            endpoints: Vec::new(),
+            key_expiry_unix_secs: None,
+            map_request_version: 1,
+            map_session_handle: None,
+            map_session_seq: 0,
+            last_control_seen_at_unix_secs: None,
+            last_map_poll_at_unix_secs: None,
+        }];
+
+        let error = validate_backup_control_nodes(&nodes, &control_nodes)
+            .expect_err("empty machine keys must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "invalid request: backup control node contains an empty machine_key"
+        );
     }
 }

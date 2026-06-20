@@ -11,15 +11,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::body::Body;
 use axum::extract::{Extension, Path, Query, Request, State};
 use axum::http::header::{AUTHORIZATION, CONTENT_TYPE, HOST, LOCATION, WWW_AUTHENTICATE};
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, get_service, post};
 use axum::{Json, Router};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use http_body_util::BodyExt as _;
-use hyper::body::Incoming;
+use http_body_util::{BodyExt as _, LengthLimitError, Limited};
+use hyper::body::{Bytes, Incoming};
 use hyper::server::conn::{http1, http2};
 use hyper::service::service_fn;
 use hyper::{Request as HyperRequest, Response as HyperResponse};
@@ -37,7 +37,7 @@ use tokio_rustls::{
 use tokio_stream::wrappers::ReceiverStream;
 use tower::Service;
 use tower_http::services::ServeDir;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::app::{AdminHealthResponse, HealthService, LivezResponse, ReadyzResponse};
@@ -1197,19 +1197,53 @@ struct StreamUpdateContext<'a> {
 async fn decode_json_request<T: serde::de::DeserializeOwned>(
     request: HyperRequest<Incoming>,
 ) -> AppResult<T> {
-    let body = request
-        .into_body()
-        .collect()
+    let body = read_limited_body(request.into_body(), CONTROL_BODY_LIMIT)
         .await
-        .map_err(|err| AppError::InvalidRequest(format!("failed to read request body: {err}")))?
-        .to_bytes();
-    if body.len() > CONTROL_BODY_LIMIT {
-        return Err(AppError::InvalidRequest(format!(
-            "request body exceeds limit of {CONTROL_BODY_LIMIT} bytes"
-        )));
-    }
+        .map_err(|err| match err {
+            LimitedBodyError::TooLarge => AppError::InvalidRequest(format!(
+                "request body exceeds limit of {CONTROL_BODY_LIMIT} bytes"
+            )),
+            LimitedBodyError::Read(message) => {
+                AppError::InvalidRequest(format!("failed to read request body: {message}"))
+            }
+        })?;
     serde_json::from_slice::<T>(&body)
         .map_err(|err| AppError::InvalidRequest(format!("failed to decode request JSON: {err}")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum LimitedBodyError {
+    TooLarge,
+    Read(String),
+}
+
+impl std::fmt::Display for LimitedBodyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooLarge => formatter.write_str("request body exceeds limit"),
+            Self::Read(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for LimitedBodyError {}
+
+async fn read_limited_body<B>(body: B, limit: usize) -> Result<Bytes, LimitedBodyError>
+where
+    B: hyper::body::Body,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    Limited::new(body, limit)
+        .collect()
+        .await
+        .map(|collected| collected.to_bytes())
+        .map_err(|err| {
+            if err.is::<LengthLimitError>() {
+                LimitedBodyError::TooLarge
+            } else {
+                LimitedBodyError::Read(err.to_string())
+            }
+        })
 }
 
 fn decode_query<T>(query: Option<&str>) -> AppResult<T>
@@ -1258,36 +1292,78 @@ fn request_authority_host(request: &HyperRequest<Incoming>) -> Option<&str> {
 
 fn authority_host(value: &str) -> Option<&str> {
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.contains('@') {
         return None;
     }
 
     if let Some(stripped) = value.strip_prefix('[') {
-        return stripped.split_once(']').map(|(host, _)| host);
+        let (host, after_host) = stripped.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+
+        return match after_host.strip_prefix(':') {
+            Some(port) if !port.is_empty() && port.parse::<u16>().is_ok() => Some(host),
+            Some(_) => None,
+            None if after_host.is_empty() => Some(host),
+            None => None,
+        };
+    }
+
+    if value.contains('[') || value.contains(']') {
+        return None;
     }
 
     if let Some((host, port)) = value.rsplit_once(':')
+        && !host.is_empty()
         && !host.contains(':')
+        && !port.is_empty()
         && port.parse::<u16>().is_ok()
     {
         return Some(host);
+    }
+
+    if value.contains(':') {
+        return None;
     }
 
     Some(value)
 }
 
 fn control_error_response(error: AppError) -> HyperResponse<Body> {
-    let status = match error {
-        AppError::Unauthorized(_) => StatusCode::UNAUTHORIZED,
-        AppError::InvalidRequest(_) | AppError::InvalidConfig(_) | AppError::Json(_) => {
-            StatusCode::BAD_REQUEST
-        }
-        AppError::NotFound(_) => StatusCode::NOT_FOUND,
-        AppError::Conflict(_) => StatusCode::CONFLICT,
-        _ => StatusCode::INTERNAL_SERVER_ERROR,
-    };
+    let (status, message) = control_error_payload(error);
+    text_response(status, message)
+}
 
-    text_response(status, error.to_string())
+fn control_error_payload(error: AppError) -> (StatusCode, String) {
+    match error {
+        AppError::Unauthorized(message) => (StatusCode::UNAUTHORIZED, message),
+        AppError::InvalidRequest(message) => (StatusCode::BAD_REQUEST, message),
+        AppError::InvalidConfig(message) => (StatusCode::BAD_REQUEST, message),
+        AppError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+        AppError::Conflict(message) => (StatusCode::CONFLICT, message),
+        error => internal_control_error_payload(error),
+    }
+}
+
+fn internal_control_error_payload(error: AppError) -> (StatusCode, String) {
+    let error_message = error.to_string();
+    let (status, message) = match &error {
+        AppError::Http(_) => (
+            StatusCode::BAD_GATEWAY,
+            "upstream service unavailable".to_string(),
+        ),
+        AppError::Bootstrap(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "service is temporarily unavailable".to_string(),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal server error".to_string(),
+        ),
+    };
+    error!(error = %error_message, "control request failed with internal error");
+    (status, message)
 }
 
 fn json_response<T>(status: StatusCode, result: AppResult<T>) -> HyperResponse<Body>
@@ -1529,25 +1605,19 @@ async fn verify_derp_client(
     request: Request,
 ) -> Result<Json<DerpAdmitClientResponse>, ApiError> {
     let database = state.database()?;
-    let body = request
-        .into_body()
-        .collect()
+    let body = read_limited_body(request.into_body(), VERIFY_BODY_LIMIT)
         .await
-        .map_err(|err| {
-            ApiError::from(AppError::InvalidRequest(format!(
-                "failed to read request body: {err}"
-            )))
-        })?
-        .to_bytes();
-
-    if body.len() > VERIFY_BODY_LIMIT {
-        return Err(ApiError {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            code: "payload_too_large",
-            message: format!("verify request body exceeds limit of {VERIFY_BODY_LIMIT} bytes"),
-            www_authenticate: None,
-        });
-    }
+        .map_err(|err| match err {
+            LimitedBodyError::TooLarge => ApiError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "payload_too_large",
+                message: format!("verify request body exceeds limit of {VERIFY_BODY_LIMIT} bytes"),
+                www_authenticate: None,
+            },
+            LimitedBodyError::Read(message) => ApiError::from(AppError::InvalidRequest(format!(
+                "failed to read request body: {message}"
+            ))),
+        })?;
 
     let request = serde_json::from_slice::<DerpAdmitClientRequest>(&body).map_err(|err| {
         ApiError::from(AppError::InvalidRequest(format!(
@@ -2278,24 +2348,18 @@ fn bootstrap_dns_hosts(derp: &DerpMapRuntime, public_base_url: Option<&str>) -> 
 
 fn public_base_host(url: Option<&str>) -> Option<String> {
     let url = url?.trim();
-    let authority = url.split("://").nth(1)?.split('/').next()?;
-    if authority.is_empty() {
+    let uri = url.parse::<Uri>().ok()?;
+    if !matches!(uri.scheme_str(), Some("http" | "https")) || uri.authority().is_none() {
         return None;
     }
 
-    if authority.starts_with('[') {
-        return authority
-            .strip_prefix('[')
-            .and_then(|value| value.split(']').next())
-            .map(str::to_string);
-    }
-
-    Some(
-        authority
-            .split_once(':')
-            .map_or(authority, |(host, _)| host)
-            .to_string(),
-    )
+    let (_, remainder) = url.split_once("://")?;
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .map(str::trim)
+        .filter(|authority| !authority.is_empty())?;
+    authority_host(authority).map(str::to_string)
 }
 
 async fn resolve_host_ips(host: &str) -> Vec<String> {
@@ -2340,6 +2404,21 @@ impl ApiError {
             www_authenticate: Some(NODE_WWW_AUTHENTICATE),
         }
     }
+
+    fn internal(
+        status: StatusCode,
+        code: &'static str,
+        message: impl Into<String>,
+        error: impl std::fmt::Display,
+    ) -> Self {
+        error!(code, %error, "request failed with internal error");
+        Self {
+            status,
+            code,
+            message: message.into(),
+            www_authenticate: None,
+        }
+    }
 }
 
 fn map_node_control_error(error: AppError) -> ApiError {
@@ -2358,12 +2437,12 @@ impl From<AppError> for ApiError {
                 message,
                 www_authenticate: None,
             },
-            AppError::InvalidConfig(message) => Self {
-                status: StatusCode::BAD_REQUEST,
-                code: "invalid_config",
+            AppError::InvalidConfig(message) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "invalid_config",
+                "server configuration is invalid",
                 message,
-                www_authenticate: None,
-            },
+            ),
             AppError::NotFound(message) => Self {
                 status: StatusCode::NOT_FOUND,
                 code: "not_found",
@@ -2376,54 +2455,54 @@ impl From<AppError> for ApiError {
                 message,
                 www_authenticate: None,
             },
-            AppError::Database(error) => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "database_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            AppError::Migration(error) => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "migration_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
+            AppError::Database(error) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "database_error",
+                "internal server error",
+                error,
+            ),
+            AppError::Migration(error) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "migration_error",
+                "internal server error",
+                error,
+            ),
             AppError::Unauthorized(message) => Self {
                 status: StatusCode::UNAUTHORIZED,
                 code: "unauthorized",
                 message,
                 www_authenticate: None,
             },
-            AppError::Http(error) => Self {
-                status: StatusCode::BAD_GATEWAY,
-                code: "upstream_http_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            AppError::Config(error) => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "config_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            AppError::Json(error) => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "json_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            AppError::Io(error) => Self {
-                status: StatusCode::INTERNAL_SERVER_ERROR,
-                code: "io_error",
-                message: error.to_string(),
-                www_authenticate: None,
-            },
-            AppError::Bootstrap(message) => Self {
-                status: StatusCode::SERVICE_UNAVAILABLE,
-                code: "bootstrap_error",
+            AppError::Http(error) => Self::internal(
+                StatusCode::BAD_GATEWAY,
+                "upstream_http_error",
+                "upstream service unavailable",
+                error,
+            ),
+            AppError::Config(error) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "config_error",
+                "server configuration is invalid",
+                error,
+            ),
+            AppError::Json(error) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "json_error",
+                "internal server error",
+                error,
+            ),
+            AppError::Io(error) => Self::internal(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "io_error",
+                "internal server error",
+                error,
+            ),
+            AppError::Bootstrap(message) => Self::internal(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "bootstrap_error",
+                "service is temporarily unavailable",
                 message,
-                www_authenticate: None,
-            },
+            ),
         }
     }
 }
@@ -2790,6 +2869,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn limited_body_reader_accepts_exact_limit() -> TestResult {
+        let body = read_limited_body(Body::from(vec![b'a'; 4]), 4).await?;
+
+        assert_eq!(body.len(), 4);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn limited_body_reader_rejects_oversized_payloads() {
+        let error = read_limited_body(Body::from(vec![b'a'; 5]), 4)
+            .await
+            .expect_err("oversized request bodies must be rejected");
+
+        assert_eq!(error, LimitedBodyError::TooLarge);
+    }
+
+    #[tokio::test]
+    async fn api_errors_do_not_expose_internal_error_details() -> TestResult {
+        let response = ApiError::from(AppError::Database(sqlx::Error::RowNotFound)).into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let json = serde_json::from_slice::<serde_json::Value>(&body)?;
+        let error = json
+            .get("error")
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| std::io::Error::other("error payload should be present"))?;
+
+        assert_eq!(
+            error.get("code").and_then(serde_json::Value::as_str),
+            Some("database_error")
+        );
+        assert_eq!(
+            error.get("message").and_then(serde_json::Value::as_str),
+            Some("internal server error")
+        );
+        assert!(!String::from_utf8(body.to_vec())?.contains("no rows returned"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn control_errors_do_not_expose_internal_error_details() -> TestResult {
+        let response = control_error_response(AppError::Database(sqlx::Error::RowNotFound));
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await?;
+        let message = String::from_utf8(body.to_vec())?;
+
+        assert_eq!(message, "internal server error");
+        assert!(!message.contains("no rows returned"));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn admin_derp_map_returns_effective_snapshot() -> TestResult {
         let app = router(AppState::without_database(test_config())?);
         let response = app
@@ -2836,6 +2969,48 @@ mod tests {
             None
         );
         assert_eq!(parse_ssh_action_path("/machine/register"), None);
+    }
+
+    #[test]
+    fn authority_host_strictly_parses_host_headers() {
+        assert_eq!(
+            authority_host("control.example.com"),
+            Some("control.example.com")
+        );
+        assert_eq!(
+            authority_host("control.example.com:443"),
+            Some("control.example.com")
+        );
+        assert_eq!(authority_host("[2001:db8::1]"), Some("2001:db8::1"));
+        assert_eq!(authority_host("[2001:db8::1]:443"), Some("2001:db8::1"));
+
+        assert_eq!(authority_host("user@control.example.com"), None);
+        assert_eq!(authority_host("[::1].evil"), None);
+        assert_eq!(authority_host("control.example.com:"), None);
+        assert_eq!(authority_host("control.example.com:invalid"), None);
+        assert_eq!(authority_host("2001:db8::1"), None);
+    }
+
+    #[test]
+    fn public_base_host_strictly_parses_configured_url() {
+        assert_eq!(
+            public_base_host(Some("https://control.example.com:8443/path?region=1")),
+            Some("control.example.com".to_string())
+        );
+        assert_eq!(
+            public_base_host(Some("https://[2001:db8::1]:8443")),
+            Some("2001:db8::1".to_string())
+        );
+        assert_eq!(
+            public_base_host(Some("https://user@control.example.com")),
+            None
+        );
+        assert_eq!(public_base_host(Some("https://[::1].evil")), None);
+        assert_eq!(
+            public_base_host(Some("https://control.example.com:invalid")),
+            None
+        );
+        assert_eq!(public_base_host(Some("/relative")), None);
     }
 
     #[test]

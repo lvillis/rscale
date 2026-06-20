@@ -4,6 +4,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Duration;
 
 use ::time::OffsetDateTime;
+use axum::http::Uri;
 use reqx::TlsVersion;
 use reqx::prelude::{Client, RetryPolicy};
 use serde::{Deserialize, Serialize};
@@ -404,22 +405,31 @@ fn validate_effective_map(map: &ControlDerpMap) -> AppResult<()> {
 }
 
 fn split_url(url: &str) -> AppResult<(String, String)> {
-    let Some(scheme_end) = url.find("://") else {
+    let uri = url.parse::<Uri>().map_err(|err| {
+        AppError::InvalidConfig(format!("DERP URL must be an absolute URL: {url}: {err}"))
+    })?;
+    let Some(scheme) = uri.scheme_str() else {
         return Err(AppError::InvalidConfig(format!(
             "DERP URL must include a scheme: {url}"
         )));
     };
-    let authority_start = scheme_end + 3;
-    let path_start = url[authority_start..]
-        .find('/')
-        .map(|offset| authority_start + offset)
-        .unwrap_or(url.len());
-    let origin = url[..path_start].to_string();
-    let path = if path_start == url.len() {
-        "/".to_string()
-    } else {
-        url[path_start..].to_string()
+    let Some(authority) = uri.authority() else {
+        return Err(AppError::InvalidConfig(format!(
+            "DERP URL must include a host: {url}"
+        )));
     };
+    let origin = format!("{scheme}://{authority}");
+    let path = uri
+        .path_and_query()
+        .map(|path| {
+            let path = path.as_str();
+            if path.starts_with('?') {
+                format!("/{path}")
+            } else {
+                path.to_string()
+            }
+        })
+        .unwrap_or_else(|| "/".to_string());
 
     Ok((origin, path))
 }
@@ -474,6 +484,27 @@ mod tests {
         )?;
 
         assert!(map.regions.is_empty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn split_url_preserves_query_without_explicit_path() -> TestResult {
+        assert_eq!(
+            split_url("https://derp.example.com?region=1")?,
+            (
+                "https://derp.example.com".to_string(),
+                "/?region=1".to_string()
+            )
+        );
+        assert_eq!(
+            split_url("https://derp.example.com/derpmap/default?region=1")?,
+            (
+                "https://derp.example.com".to_string(),
+                "/derpmap/default?region=1".to_string()
+            )
+        );
+        assert!(split_url("/derpmap/default").is_err());
 
         Ok(())
     }

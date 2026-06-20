@@ -5,7 +5,7 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::http::{HeaderValue, Request as HttpRequest, StatusCode};
+use axum::http::{HeaderValue, Request as HttpRequest, StatusCode, Uri};
 use crc32fast::hash as crc32_hash;
 use crypto_box::aead::{Aead, generic_array::GenericArray};
 use crypto_box::{PublicKey, SalsaBox, SecretKey};
@@ -877,11 +877,7 @@ impl EmbeddedDerpServer {
                     let mut dst_public_key_raw = [0_u8; DERP_KEY_LEN];
                     dst_public_key_raw.copy_from_slice(&payload[..DERP_KEY_LEN]);
                     let packet = payload[DERP_KEY_LEN..].to_vec();
-                    if packet.len() > DERP_MAX_PACKET_SIZE {
-                        return Err(AppError::InvalidRequest(format!(
-                            "DERP packet exceeds maximum payload of {DERP_MAX_PACKET_SIZE} bytes"
-                        )));
-                    }
+                    validate_derp_packet_payload(&packet, "DERP packet")?;
 
                     if !self
                         .route_packet(client.public_key_raw, dst_public_key_raw, packet)
@@ -990,11 +986,7 @@ impl EmbeddedDerpServer {
         let mut dst_public_key_raw = [0_u8; DERP_KEY_LEN];
         dst_public_key_raw.copy_from_slice(&payload[DERP_KEY_LEN..DERP_MESH_FRAME_OVERHEAD]);
         let packet = payload[DERP_MESH_FRAME_OVERHEAD..].to_vec();
-        if packet.len() > DERP_MAX_PACKET_SIZE {
-            return Err(AppError::InvalidRequest(format!(
-                "DERP forwarded packet exceeds maximum payload of {DERP_MAX_PACKET_SIZE} bytes"
-            )));
-        }
+        validate_derp_packet_payload(&packet, "DERP forwarded packet")?;
 
         if !self
             .route_packet(src_public_key_raw, dst_public_key_raw, packet)
@@ -1720,6 +1712,22 @@ fn open_box(
         .map_err(|_| AppError::Unauthorized("failed to open DERP client nacl box".to_string()))
 }
 
+fn validate_derp_packet_payload(packet: &[u8], label: &str) -> AppResult<()> {
+    if packet.is_empty() {
+        return Err(AppError::InvalidRequest(format!(
+            "{label} payload must not be empty"
+        )));
+    }
+
+    if packet.len() > DERP_MAX_PACKET_SIZE {
+        return Err(AppError::InvalidRequest(format!(
+            "{label} exceeds maximum payload of {DERP_MAX_PACKET_SIZE} bytes"
+        )));
+    }
+
+    Ok(())
+}
+
 fn peer_present_flags(client: &RelayClient) -> u8 {
     let mut flags = if client.can_mesh {
         PEER_PRESENT_IS_MESH_PEER
@@ -1767,29 +1775,83 @@ fn mesh_url_for_node(node: &ControlDerpNode, mesh_url_override: Option<&str>) ->
 
 fn normalize_mesh_url(value: &str) -> AppResult<String> {
     let trimmed = value.trim();
-    let normalized = if let Some(rest) = trimmed.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = trimmed.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else if trimmed.starts_with("wss://") || trimmed.starts_with("ws://") {
-        trimmed.to_string()
-    } else {
-        return Err(AppError::InvalidConfig(format!(
-            "DERP mesh URL must use http, https, ws, or wss: {trimmed}"
-        )));
+    let uri = trimmed
+        .parse::<Uri>()
+        .map_err(|err| AppError::InvalidConfig(format!("invalid DERP mesh URL: {err}")))?;
+    let scheme = match uri.scheme_str() {
+        Some("https" | "wss") => "wss",
+        Some("http" | "ws") => "ws",
+        _ => {
+            return Err(AppError::InvalidConfig(format!(
+                "DERP mesh URL must use http, https, ws, or wss: {trimmed}"
+            )));
+        }
+    };
+    let authority = uri
+        .authority()
+        .map(|authority| authority.as_str())
+        .filter(|authority| valid_url_authority(authority))
+        .ok_or_else(|| {
+            AppError::InvalidConfig("DERP mesh URL must include a valid host".to_string())
+        })?;
+    let (_, after_scheme) = trimmed.split_once("://").ok_or_else(|| {
+        AppError::InvalidConfig(format!(
+            "DERP mesh URL must contain a scheme separator: {trimmed}"
+        ))
+    })?;
+    let path_and_query = match after_scheme.find(['/', '?']) {
+        Some(index) if after_scheme[index..].starts_with('?') => {
+            format!("/derp{}", &after_scheme[index..])
+        }
+        Some(index) => after_scheme[index..].to_string(),
+        None => "/derp".to_string(),
     };
 
-    let Some((_, after_scheme)) = normalized.split_once("://") else {
-        return Err(AppError::InvalidConfig(format!(
-            "DERP mesh URL must contain a scheme separator: {trimmed}"
-        )));
-    };
-    let has_path = after_scheme.contains('/');
-    if has_path {
-        Ok(normalized)
-    } else {
-        Ok(format!("{normalized}/derp"))
+    Ok(format!("{scheme}://{authority}{path_and_query}"))
+}
+
+fn valid_url_authority(authority: &str) -> bool {
+    authority_host(authority).is_some()
+}
+
+fn authority_host(value: &str) -> Option<&str> {
+    let value = value.trim();
+    if value.is_empty() || value.contains('@') {
+        return None;
     }
+
+    if let Some(stripped) = value.strip_prefix('[') {
+        let (host, after_host) = stripped.split_once(']')?;
+        if host.is_empty() {
+            return None;
+        }
+
+        return match after_host.strip_prefix(':') {
+            Some(port) if !port.is_empty() && port.parse::<u16>().is_ok() => Some(host),
+            Some(_) => None,
+            None if after_host.is_empty() => Some(host),
+            None => None,
+        };
+    }
+
+    if value.contains('[') || value.contains(']') {
+        return None;
+    }
+
+    if let Some((host, port)) = value.rsplit_once(':')
+        && !host.is_empty()
+        && !host.contains(':')
+        && !port.is_empty()
+        && port.parse::<u16>().is_ok()
+    {
+        return Some(host);
+    }
+
+    if value.contains(':') {
+        return None;
+    }
+
+    Some(value)
 }
 
 fn parse_mesh_key(value: &str) -> AppResult<[u8; DERP_KEY_LEN]> {
@@ -1996,8 +2058,42 @@ mod tests {
             normalize_mesh_url("http://derp.example.com/derp")?,
             "ws://derp.example.com/derp"
         );
+        assert_eq!(
+            normalize_mesh_url("https://derp.example.com?region=1")?,
+            "wss://derp.example.com/derp?region=1"
+        );
 
         Ok(())
+    }
+
+    #[test]
+    fn normalize_mesh_url_rejects_invalid_authorities() {
+        assert!(normalize_mesh_url("https://user@derp.example.com").is_err());
+        assert!(normalize_mesh_url("https://[::1].evil").is_err());
+        assert!(normalize_mesh_url("https://derp.example.com:invalid").is_err());
+        assert!(normalize_mesh_url("https:///derp").is_err());
+    }
+
+    #[test]
+    fn derp_packet_payload_validation_rejects_empty_or_oversized_payloads() {
+        let empty_error = validate_derp_packet_payload(&[], "DERP packet")
+            .expect_err("empty DERP packets must be rejected");
+        assert_eq!(
+            empty_error.to_string(),
+            "invalid request: DERP packet payload must not be empty"
+        );
+
+        let oversized = vec![0_u8; DERP_MAX_PACKET_SIZE + 1];
+        let oversized_error = validate_derp_packet_payload(&oversized, "DERP forwarded packet")
+            .expect_err("oversized DERP packets must be rejected");
+        assert_eq!(
+            oversized_error.to_string(),
+            format!(
+                "invalid request: DERP forwarded packet exceeds maximum payload of {DERP_MAX_PACKET_SIZE} bytes"
+            )
+        );
+
+        assert!(validate_derp_packet_payload(&[0], "DERP packet").is_ok());
     }
 
     #[test]

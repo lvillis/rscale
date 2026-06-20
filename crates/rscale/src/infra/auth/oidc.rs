@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use axum::http::Uri;
 use axum::http::header::{AUTHORIZATION, HeaderValue};
 use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
@@ -10,6 +11,7 @@ use jsonwebtoken::{DecodingKey, Validation, decode, decode_header};
 use reqx::TlsVersion;
 use reqx::prelude::{Client, RetryPolicy};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::config::OidcConfig;
 use crate::error::{AppError, AppResult};
@@ -130,9 +132,7 @@ impl OidcProviderClient {
             .map_err(AppError::from)?
             .send_json()
             .await
-            .map_err(|err| {
-                AppError::Unauthorized(format!("failed to exchange OIDC authorization code: {err}"))
-            })
+            .map_err(|err| oidc_unauthorized_error("OIDC authorization code exchange failed", err))
     }
 
     async fn fetch_jwks(&self, jwks_uri: &str) -> AppResult<JwkSet> {
@@ -161,7 +161,7 @@ impl OidcProviderClient {
             .header(AUTHORIZATION, authorization)
             .send_json()
             .await
-            .map_err(|err| AppError::Unauthorized(format!("failed to fetch OIDC userinfo: {err}")))
+            .map_err(|err| oidc_unauthorized_error("OIDC userinfo lookup failed", err))
     }
 }
 
@@ -299,18 +299,18 @@ impl OidcRuntime {
             self.discovery.userinfo_endpoint.as_deref(),
             tokens.access_token.as_deref(),
         ) {
-            (Some(endpoint), Some(access_token)) if !access_token.is_empty() => Some(
-                self.client
-                    .fetch_userinfo(endpoint, access_token)
-                    .await
-                    .map_err(|err| {
-                        AppError::Unauthorized(format!(
-                            "OIDC authentication succeeded but userinfo lookup failed: {err}"
-                        ))
-                    })?,
-            ),
+            (Some(endpoint), Some(access_token)) if !access_token.is_empty() => {
+                Some(self.client.fetch_userinfo(endpoint, access_token).await?)
+            }
             _ => None,
         };
+        if let Some(userinfo) = &userinfo {
+            reject_unverified_email_claim(
+                "userinfo",
+                userinfo.email.as_deref(),
+                userinfo.email_verified,
+            )?;
+        }
 
         let principal = merged_principal(&self.discovery.issuer, claims, userinfo);
         self.authorize_principal(&principal)?;
@@ -455,13 +455,11 @@ fn verify_id_token(
     expected_nonce: &str,
     jwks: &JwkSet,
 ) -> AppResult<OidcIdTokenClaims> {
-    let header = decode_header(id_token).map_err(|err| {
-        AppError::Unauthorized(format!("failed to decode OIDC ID token header: {err}"))
-    })?;
+    let header = decode_header(id_token)
+        .map_err(|err| oidc_unauthorized_error("OIDC ID token header is invalid", err))?;
     let jwk = select_verification_key(jwks, header.kid.as_deref(), header.alg)?;
-    let decoding_key = DecodingKey::from_jwk(jwk).map_err(|err| {
-        AppError::Unauthorized(format!("failed to construct OIDC verification key: {err}"))
-    })?;
+    let decoding_key = DecodingKey::from_jwk(jwk)
+        .map_err(|err| oidc_unauthorized_error("OIDC verification key is invalid", err))?;
 
     let mut validation = Validation::new(header.alg);
     validation.leeway = 30;
@@ -471,7 +469,7 @@ fn verify_id_token(
     validation.set_audience(&[client_id]);
 
     let claims = decode::<OidcIdTokenClaims>(id_token, &decoding_key, &validation)
-        .map_err(|err| AppError::Unauthorized(format!("failed to validate OIDC ID token: {err}")))?
+        .map_err(|err| oidc_unauthorized_error("OIDC ID token validation failed", err))?
         .claims;
 
     if claims.nonce.as_deref() != Some(expected_nonce) {
@@ -480,13 +478,28 @@ fn verify_id_token(
         ));
     }
 
-    if claims.email.is_some() && claims.email_verified == Some(false) {
-        return Err(AppError::Unauthorized(
-            "OIDC email claim is present but not verified".to_string(),
-        ));
-    }
+    reject_unverified_email_claim("ID token", claims.email.as_deref(), claims.email_verified)?;
 
     Ok(claims)
+}
+
+fn reject_unverified_email_claim(
+    source: &str,
+    email: Option<&str>,
+    email_verified: Option<bool>,
+) -> AppResult<()> {
+    if email.is_some() && email_verified == Some(false) {
+        return Err(AppError::Unauthorized(format!(
+            "OIDC {source} email claim is present but not verified"
+        )));
+    }
+
+    Ok(())
+}
+
+fn oidc_unauthorized_error(message: &'static str, error: impl std::fmt::Display) -> AppError {
+    warn!(%error, message, "OIDC authorization failed");
+    AppError::Unauthorized(message.to_string())
 }
 
 fn select_verification_key<'a>(
@@ -514,9 +527,13 @@ fn select_verification_key<'a>(
     };
 
     selected.ok_or_else(|| {
-        AppError::Unauthorized(format!(
-            "OIDC provider JWKS does not contain a usable signing key for {algorithm:?}"
-        ))
+        warn!(
+            ?algorithm,
+            "OIDC provider JWKS did not contain a usable signing key"
+        );
+        AppError::Unauthorized(
+            "OIDC provider JWKS does not contain a usable signing key".to_string(),
+        )
     })
 }
 
@@ -564,25 +581,43 @@ fn validate_discovery_document(
         )));
     }
 
-    if document.authorization_endpoint.is_empty() {
-        return Err(AppError::Bootstrap(
-            "OIDC discovery authorization_endpoint must not be empty".to_string(),
-        ));
+    validate_discovery_endpoint("authorization_endpoint", &document.authorization_endpoint)?;
+    validate_discovery_endpoint("token_endpoint", &document.token_endpoint)?;
+    validate_discovery_endpoint("jwks_uri", &document.jwks_uri)?;
+    validate_optional_discovery_endpoint(
+        "userinfo_endpoint",
+        document.userinfo_endpoint.as_deref(),
+    )?;
+    validate_optional_discovery_endpoint(
+        "end_session_endpoint",
+        document.end_session_endpoint.as_deref(),
+    )?;
+
+    Ok(())
+}
+
+fn validate_discovery_endpoint(name: &str, value: &str) -> AppResult<()> {
+    if value.trim().is_empty() {
+        return Err(AppError::Bootstrap(format!(
+            "OIDC discovery {name} must not be empty"
+        )));
     }
 
-    if document.token_endpoint.is_empty() {
-        return Err(AppError::Bootstrap(
-            "OIDC discovery token_endpoint must not be empty".to_string(),
-        ));
-    }
-
-    if document.jwks_uri.is_empty() {
-        return Err(AppError::Bootstrap(
-            "OIDC discovery jwks_uri must not be empty".to_string(),
-        ));
+    if !is_secure_or_local(value) {
+        return Err(AppError::Bootstrap(format!(
+            "OIDC discovery {name} must use https unless it points to a local development endpoint"
+        )));
     }
 
     Ok(())
+}
+
+fn validate_optional_discovery_endpoint(name: &str, value: Option<&str>) -> AppResult<()> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+
+    validate_discovery_endpoint(name, value)
 }
 
 fn normalize_url(value: &str) -> String {
@@ -602,10 +637,80 @@ fn normalized_set(values: &[String]) -> BTreeSet<String> {
 }
 
 fn is_secure_or_local(value: &str) -> bool {
-    value.starts_with("https://")
-        || value.starts_with("http://127.0.0.1")
-        || value.starts_with("http://localhost")
-        || value.starts_with("http://[::1]")
+    let Ok(uri) = value.trim().parse::<Uri>() else {
+        return false;
+    };
+
+    match (uri.scheme_str(), uri.host(), uri.authority()) {
+        (Some("https"), Some(_), Some(authority)) => is_valid_http_authority(authority.as_str()),
+        (Some("http"), Some(_), Some(authority)) => is_local_http_authority(authority.as_str()),
+        _ => false,
+    }
+}
+
+fn is_local_http_authority(authority: &str) -> bool {
+    let Some((host, _)) = valid_http_authority_parts(authority) else {
+        return false;
+    };
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn is_valid_http_authority(authority: &str) -> bool {
+    valid_http_authority_parts(authority).is_some()
+}
+
+fn valid_http_authority_parts(authority: &str) -> Option<(&str, Option<&str>)> {
+    if authority.contains('@') {
+        return None;
+    }
+
+    let (host, port) = split_authority_host_port(authority)?;
+    if host.is_empty() {
+        return None;
+    }
+
+    if let Some(port) = port
+        && (port.is_empty() || port.parse::<u16>().is_err())
+    {
+        return None;
+    }
+
+    Some((host, port))
+}
+
+fn split_authority_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after_host) = rest.split_once(']')?;
+        let port = match after_host.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after_host.is_empty() => None,
+            None => return None,
+        };
+        return Some((host, port));
+    }
+
+    if authority.contains('[') || authority.contains(']') {
+        return None;
+    }
+
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => Some((host, Some(port))),
+        Some(_) => None,
+        None => Some((authority, None)),
+    }
 }
 
 fn pkce_challenge(verifier: &str) -> String {
@@ -657,6 +762,8 @@ struct OidcIdTokenClaims {
 struct OidcUserInfo {
     #[serde(default)]
     email: Option<String>,
+    #[serde(default)]
+    email_verified: Option<bool>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
@@ -738,6 +845,64 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_localhost_prefix_spoofing() {
+        let config = test_config("http://localhost.evil".to_string());
+        assert!(validate(&config).is_err());
+
+        let config = test_config("http://127.0.0.1.evil".to_string());
+        assert!(validate(&config).is_err());
+
+        let config = test_config("https://user@issuer.example.com".to_string());
+        assert!(validate(&config).is_err());
+    }
+
+    #[test]
+    fn discovery_document_rejects_insecure_external_endpoints() {
+        let document = OidcDiscoveryDocument {
+            issuer: "https://issuer.example.com".to_string(),
+            authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+            token_endpoint: "http://example.com/token".to_string(),
+            jwks_uri: "https://issuer.example.com/jwks.json".to_string(),
+            userinfo_endpoint: Some("https://issuer.example.com/userinfo".to_string()),
+            end_session_endpoint: None,
+        };
+
+        let error = validate_discovery_document("https://issuer.example.com", &document)
+            .expect_err("insecure external discovery endpoints must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "bootstrap error: OIDC discovery token_endpoint must use https unless it points to a local development endpoint"
+        );
+    }
+
+    #[test]
+    fn id_token_decode_errors_are_sanitized() {
+        let discovery = OidcDiscoveryDocument {
+            issuer: "https://issuer.example.com".to_string(),
+            authorization_endpoint: "https://issuer.example.com/authorize".to_string(),
+            token_endpoint: "https://issuer.example.com/token".to_string(),
+            jwks_uri: "https://issuer.example.com/jwks.json".to_string(),
+            userinfo_endpoint: None,
+            end_session_endpoint: None,
+        };
+        let error = verify_id_token(
+            &discovery,
+            "rscale",
+            "not-a-jwt-containing-secret-token",
+            "nonce",
+            &JwkSet { keys: Vec::new() },
+        )
+        .expect_err("invalid tokens should be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: OIDC ID token header is invalid"
+        );
+        assert!(!error.to_string().contains("secret-token"));
+    }
+
+    #[test]
     fn authorization_redirect_includes_state_nonce_and_pkce() -> TestResult {
         let runtime = OidcRuntime {
             client: OidcProviderClient {
@@ -787,5 +952,22 @@ mod tests {
         assert!(redirect.contains("prompt=login"));
 
         Ok(())
+    }
+
+    #[test]
+    fn userinfo_email_claim_must_not_be_explicitly_unverified() {
+        let error =
+            reject_unverified_email_claim("userinfo", Some("alice@example.com"), Some(false))
+                .expect_err("explicitly unverified userinfo email must be rejected");
+
+        assert_eq!(
+            error.to_string(),
+            "unauthorized: OIDC userinfo email claim is present but not verified"
+        );
+    }
+
+    #[test]
+    fn userinfo_email_without_verification_flag_is_allowed() {
+        assert!(reject_unverified_email_claim("userinfo", Some("alice@example.com"), None).is_ok());
     }
 }

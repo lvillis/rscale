@@ -10,7 +10,7 @@ pub mod route;
 
 pub use audit::{AuditActor, AuditEvent, AuditEventKind};
 pub use auth_key::{AuthKey, AuthKeyState, IssuedAuthKey};
-pub use backup::{BackupAuthKey, BackupRestoreResult, BackupSnapshot};
+pub use backup::{BackupAuthKey, BackupControlNodeState, BackupRestoreResult, BackupSnapshot};
 pub use control::{NodeHeartbeat, NodeMap, NodeRegistration};
 pub use dns::DnsConfig;
 pub use node::{Node, NodeStatus, NodeTagSource};

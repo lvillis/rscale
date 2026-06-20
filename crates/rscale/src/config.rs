@@ -1,15 +1,17 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use axum::http::Uri;
 use serde::{Deserialize, Serialize};
 use tier::{ConfigLoader, EnvSource, LoadedConfig, TierConfig, ValidationErrors};
 
 use crate::error::{AppError, AppResult};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Default, TierConfig)]
 #[serde(default)]
 pub struct AppConfig {
     pub server: ServerConfig,
@@ -19,6 +21,20 @@ pub struct AppConfig {
     pub control: ControlConfig,
     pub derp: DerpConfig,
     pub telemetry: TelemetryConfig,
+}
+
+impl fmt::Debug for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AppConfig")
+            .field("server", &self.server)
+            .field("network", &self.network)
+            .field("database", &self.database)
+            .field("auth", &self.auth)
+            .field("control", &self.control)
+            .field("derp", &self.derp)
+            .field("telemetry", &self.telemetry)
+            .finish()
+    }
 }
 
 impl AppConfig {
@@ -88,6 +104,7 @@ impl AppConfig {
     fn loader(config_path: Option<&Path>) -> AppResult<ConfigLoader<Self>> {
         let mut loader = ConfigLoader::new(Self::default())
             .derive_metadata()
+            .secret_path("database.url")
             .secret_path("server.control_private_key")
             .secret_path("auth.break_glass_token")
             .secret_path("auth.oidc.client_secret")
@@ -953,7 +970,7 @@ impl AppConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
 #[serde(default)]
 pub struct ServerConfig {
     pub bind_addr: String,
@@ -962,6 +979,25 @@ pub struct ServerConfig {
     pub control_private_key: String,
     pub map_poll_interval_secs: u64,
     pub map_keepalive_interval_secs: u64,
+}
+
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("bind_addr", &self.bind_addr)
+            .field("web_root", &self.web_root)
+            .field("public_base_url", &self.public_base_url)
+            .field(
+                "control_private_key",
+                &redacted_secret(&self.control_private_key),
+            )
+            .field("map_poll_interval_secs", &self.map_poll_interval_secs)
+            .field(
+                "map_keepalive_interval_secs",
+                &self.map_keepalive_interval_secs,
+            )
+            .finish()
+    }
 }
 
 impl Default for ServerConfig {
@@ -997,11 +1033,20 @@ impl Default for NetworkConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
 #[serde(default)]
 pub struct DatabaseConfig {
     pub url: Option<String>,
     pub max_connections: u32,
+}
+
+impl fmt::Debug for DatabaseConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DatabaseConfig")
+            .field("url", &redacted_optional_secret(&self.url))
+            .field("max_connections", &self.max_connections)
+            .finish()
+    }
 }
 
 impl Default for DatabaseConfig {
@@ -1108,12 +1153,25 @@ pub enum ControlDisplayMessageSeverityConfig {
     Low,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
 #[serde(default)]
 pub struct AuthConfig {
     pub break_glass_username: String,
     pub break_glass_token: Option<String>,
     pub oidc: OidcConfig,
+}
+
+impl fmt::Debug for AuthConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthConfig")
+            .field("break_glass_username", &self.break_glass_username)
+            .field(
+                "break_glass_token",
+                &redacted_optional_secret(&self.break_glass_token),
+            )
+            .field("oidc", &self.oidc)
+            .finish()
+    }
 }
 
 impl Default for AuthConfig {
@@ -1126,7 +1184,7 @@ impl Default for AuthConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
 #[serde(default)]
 pub struct OidcConfig {
     pub enabled: bool,
@@ -1142,6 +1200,32 @@ pub struct OidcConfig {
     pub total_timeout_secs: u64,
     pub auth_flow_ttl_secs: u64,
     pub validate_discovery_on_startup: bool,
+}
+
+impl fmt::Debug for OidcConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OidcConfig")
+            .field("enabled", &self.enabled)
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &redacted_optional_secret(&self.client_secret),
+            )
+            .field("scopes", &self.scopes)
+            .field("allowed_domains", &self.allowed_domains)
+            .field("allowed_users", &self.allowed_users)
+            .field("allowed_groups", &self.allowed_groups)
+            .field("extra_params", &self.extra_params)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("total_timeout_secs", &self.total_timeout_secs)
+            .field("auth_flow_ttl_secs", &self.auth_flow_ttl_secs)
+            .field(
+                "validate_discovery_on_startup",
+                &self.validate_discovery_on_startup,
+            )
+            .finish()
+    }
 }
 
 impl Default for OidcConfig {
@@ -1176,7 +1260,7 @@ pub struct TelemetryConfig {
     pub timezone: LogTimezone,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, TierConfig)]
 #[serde(default)]
 pub struct DerpConfig {
     pub omit_default_regions: bool,
@@ -1188,6 +1272,22 @@ pub struct DerpConfig {
     pub server: DerpServerConfig,
     pub home_params: DerpHomeParamsConfig,
     pub regions: Vec<DerpRegionConfig>,
+}
+
+impl fmt::Debug for DerpConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DerpConfig")
+            .field("omit_default_regions", &self.omit_default_regions)
+            .field("urls", &self.urls)
+            .field("paths", &self.paths)
+            .field("refresh_interval_secs", &self.refresh_interval_secs)
+            .field("request_timeout_secs", &self.request_timeout_secs)
+            .field("total_timeout_secs", &self.total_timeout_secs)
+            .field("server", &self.server)
+            .field("home_params", &self.home_params)
+            .field("regions", &self.regions)
+            .finish()
+    }
 }
 
 impl Default for DerpConfig {
@@ -1206,7 +1306,7 @@ impl Default for DerpConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, TierConfig)]
 #[serde(default)]
 pub struct DerpServerConfig {
     pub enabled: bool,
@@ -1217,6 +1317,21 @@ pub struct DerpServerConfig {
     pub verify_clients: bool,
     pub keepalive_interval_secs: u64,
     pub mesh_retry_interval_secs: u64,
+}
+
+impl fmt::Debug for DerpServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DerpServerConfig")
+            .field("enabled", &self.enabled)
+            .field("private_key", &redacted_secret(&self.private_key))
+            .field("mesh_key", &redacted_optional_secret(&self.mesh_key))
+            .field("node_name", &self.node_name)
+            .field("stun_bind_addr", &self.stun_bind_addr)
+            .field("verify_clients", &self.verify_clients)
+            .field("keepalive_interval_secs", &self.keepalive_interval_secs)
+            .field("mesh_retry_interval_secs", &self.mesh_retry_interval_secs)
+            .finish()
+    }
 }
 
 impl Default for DerpServerConfig {
@@ -1424,10 +1539,15 @@ fn validate_derp_mesh_url(value: &str) -> Result<(), String> {
 }
 
 fn is_secure_or_local_http_url(value: &str) -> bool {
-    value.starts_with("https://")
-        || value.starts_with("http://127.0.0.1")
-        || value.starts_with("http://localhost")
-        || value.starts_with("http://[::1]")
+    let Ok(uri) = value.trim().parse::<Uri>() else {
+        return false;
+    };
+
+    match (uri.scheme_str(), uri.host(), uri.authority()) {
+        (Some("https"), Some(_), Some(authority)) => is_valid_http_authority(authority.as_str()),
+        (Some("http"), Some(_), Some(authority)) => is_local_http_authority(authority.as_str()),
+        _ => false,
+    }
 }
 
 fn validate_ipv4_cidr(value: &str) -> Result<(), String> {
@@ -1492,11 +1612,89 @@ fn validate_release_version(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn redacted_secret(value: &str) -> &'static str {
+    if value.trim().is_empty() {
+        "<empty>"
+    } else {
+        "<redacted>"
+    }
+}
+
+fn redacted_optional_secret(value: &Option<String>) -> &'static str {
+    match value.as_deref().map(str::trim) {
+        Some("") => "<empty>",
+        Some(_) => "<redacted>",
+        None => "<unset>",
+    }
+}
+
 fn is_secure_or_local_url(value: &str) -> bool {
-    value.starts_with("https://")
-        || value.starts_with("http://127.0.0.1")
-        || value.starts_with("http://localhost")
-        || value.starts_with("http://[::1]")
+    is_secure_or_local_http_url(value)
+}
+
+fn is_local_http_authority(authority: &str) -> bool {
+    let Some((host, _)) = valid_http_authority_parts(authority) else {
+        return false;
+    };
+
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
+fn is_valid_http_authority(authority: &str) -> bool {
+    valid_http_authority_parts(authority).is_some()
+}
+
+fn valid_http_authority_parts(authority: &str) -> Option<(&str, Option<&str>)> {
+    if authority.contains('@') {
+        return None;
+    }
+
+    let (host, port) = split_authority_host_port(authority)?;
+    if host.is_empty() {
+        return None;
+    }
+
+    if let Some(port) = port
+        && (port.is_empty() || port.parse::<u16>().is_err())
+    {
+        return None;
+    }
+
+    Some((host, port))
+}
+
+fn split_authority_host_port(authority: &str) -> Option<(&str, Option<&str>)> {
+    let authority = authority.trim();
+    if authority.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = authority.strip_prefix('[') {
+        let (host, after_host) = rest.split_once(']')?;
+        let port = match after_host.strip_prefix(':') {
+            Some(port) => Some(port),
+            None if after_host.is_empty() => None,
+            None => return None,
+        };
+        return Some((host, port));
+    }
+
+    if authority.contains('[') || authority.contains(']') {
+        return None;
+    }
+
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => Some((host, Some(port))),
+        Some(_) => None,
+        None => Some((authority, None)),
+    }
 }
 
 #[cfg(test)]
@@ -1517,6 +1715,34 @@ mod tests {
     fn default_config_requires_explicit_runtime_secrets() {
         let config = AppConfig::default();
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn config_debug_redacts_secret_fields() {
+        let mut config = AppConfig::default();
+        config.server.control_private_key =
+            "privkey:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+        config.database.url = Some("postgres://rscale:db-password@localhost/rscale".to_string());
+        config.auth.break_glass_token = Some("break-glass-secret-token".to_string());
+        config.auth.oidc.client_secret = Some("oidc-client-secret".to_string());
+        config.derp.server.private_key =
+            "privkey:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
+        config.derp.server.mesh_key =
+            Some("cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string());
+
+        let debug = format!("{config:?}");
+
+        for secret in [
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "db-password",
+            "break-glass-secret-token",
+            "oidc-client-secret",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        ] {
+            assert!(!debug.contains(secret));
+        }
+        assert!(debug.contains("<redacted>"));
     }
 
     #[test]
@@ -1834,5 +2060,22 @@ timezone = "local"
         config.control.pop_browser_url = Some("http://example.com".to_string());
 
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn secure_or_local_url_validation_rejects_prefix_spoofing() {
+        assert!(is_secure_or_local_http_url("https://example.com"));
+        assert!(is_secure_or_local_http_url("http://localhost:8080"));
+        assert!(is_secure_or_local_http_url("http://127.0.0.1:8080"));
+        assert!(is_secure_or_local_http_url("http://[::1]:8080"));
+
+        assert!(!is_secure_or_local_http_url("https://user@example.com"));
+        assert!(!is_secure_or_local_http_url("https://example.com:invalid"));
+        assert!(!is_secure_or_local_http_url("https://[::1].evil"));
+        assert!(!is_secure_or_local_http_url("http://example.com"));
+        assert!(!is_secure_or_local_http_url("http://localhost.evil"));
+        assert!(!is_secure_or_local_http_url("http://127.0.0.1.evil"));
+        assert!(!is_secure_or_local_http_url("http://[::1].evil"));
+        assert!(!is_secure_or_local_http_url("ftp://localhost"));
     }
 }
