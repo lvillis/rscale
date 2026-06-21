@@ -28,10 +28,11 @@ WORKDIR /work
 COPY Cargo.toml Cargo.lock ./
 COPY crates/rscale ./crates/rscale
 
-RUN --mount=type=cache,id=cargo-registry-${TARGETPLATFORM},target=/usr/local/cargo/registry,sharing=locked \
+RUN --mount=type=cache,id=cargo-registry-index-${TARGETPLATFORM},target=/usr/local/cargo/registry/index,sharing=locked \
+    --mount=type=cache,id=cargo-registry-cache-${TARGETPLATFORM},target=/usr/local/cargo/registry/cache,sharing=locked \
     --mount=type=cache,id=cargo-git-${TARGETPLATFORM},target=/usr/local/cargo/git/db,sharing=locked \
     --mount=type=cache,id=cargo-target-${TARGETPLATFORM},target=/work/target,sharing=locked \
-    cargo build --release --package rscale \
+    cargo build --locked --release --package rscale \
     && mkdir -p /out \
     && cp /work/target/release/rscale /out/rscale
 
