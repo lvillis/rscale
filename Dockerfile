@@ -1,22 +1,24 @@
 ARG RUST_VERSION=1.96.0
 
-FROM node:22-trixie-slim AS web-builder
+FROM --platform=$BUILDPLATFORM node:22-trixie-slim AS web-builder
 
-ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+ARG PNPM_VERSION=11.5.1
 
 ENV PNPM_HOME=/pnpm
 ENV PATH="${PNPM_HOME}:${PATH}"
 
-RUN corepack enable
+RUN corepack enable \
+    && corepack prepare "pnpm@${PNPM_VERSION}" --activate
 
 WORKDIR /work/web
 
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
-RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
+RUN --mount=type=cache,id=pnpm-store-${PNPM_VERSION}-${BUILDPLATFORM},target=/pnpm/store,sharing=locked \
     pnpm install --frozen-lockfile --store-dir /pnpm/store
 
 COPY web/ ./
-RUN --mount=type=cache,id=pnpm-store-${TARGETPLATFORM},target=/pnpm/store,sharing=locked \
+RUN --mount=type=cache,id=pnpm-store-${PNPM_VERSION}-${BUILDPLATFORM},target=/pnpm/store,sharing=locked \
     pnpm build
 
 FROM rust:${RUST_VERSION}-trixie AS rust-builder

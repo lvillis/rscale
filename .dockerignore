@@ -8,5 +8,13 @@ web/node_modules
 web/.next
 web/out
 web/.pnpm-store
+.env
+.env.*
+**/.env
+**/.env.*
+.npmrc
+**/.npmrc
+.pnpmrc
+**/.pnpmrc
 docker-compose.yml
 config/rscale.toml
